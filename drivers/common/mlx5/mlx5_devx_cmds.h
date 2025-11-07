@@ -331,6 +331,7 @@ struct mlx5_hca_attr {
 	uint8_t max_header_modify_pattern_length;
 	uint64_t system_image_guid;
 	uint32_t log_max_conn_track_offload:5;
+	uint32_t max_multi_user_group_size;
 };
 
 /* LAG Context. */

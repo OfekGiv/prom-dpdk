@@ -533,6 +533,7 @@ struct mlx5_common_dev_config {
 	/* Allow/prevent implicit mempool memory registration. */
 	unsigned int mr_ext_memseg_en:1;
 	/* Whether memseg should be extended for MR creation. */
+	int muqp_size; /* Enable Multi-User-Queue-Pair */
 };
 
 struct mlx5_common_device {
