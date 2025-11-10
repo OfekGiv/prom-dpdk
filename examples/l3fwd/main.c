@@ -49,6 +49,47 @@
 #include "l3fwd_event.h"
 #include "l3fwd_route.h"
 
+#include <infiniband/verbs.h>
+#include <infiniband/mlx5dv.h>
+#include "/homes/ofekdg/dpdk/drivers/common/mlx5/mlx5_prm.h"
+
+// ---- PRM hard-coded positions (from your screenshot) ----
+#define QPC_DWORD_0   0x00   // "0h" row (bytes)
+#define QPC_DWORD_Ch   0x0C   // "Ch" row (bytes)
+#define QPC_DWORD_14h 0x14   // "14h" row (bytes) = 0x14 bytes = 20 bytes
+#define QPC_DWORD_78h 0x78   // "78h" row (bytes) = 0x78 bytes
+
+// 0h: multi_user_qp_type [1:0]
+#define MUQP_TYPE_DWOFF   QPC_DWORD_0
+#define MUQP_TYPE_HI      1
+#define MUQP_TYPE_LO      0
+#define MUQP_TYPE_MASTER  1   // per spec ENUM; adjust if your PRM says otherwise
+
+// 0h: offload_type [11:8]
+#define OFFLOAD_TYPE_DWOFF QPC_DWORD_0
+#define OFFLOAD_TYPE_HI    7
+#define OFFLOAD_TYPE_LO    4
+//
+// 0Ch: uar_page [23:0]
+#define UAR_PAGE_ID_DWOFF QPC_DWORD_Ch
+#define UAR_PAGE_ID_HI    23
+#define UAR_PAGE_ID_LO    0
+
+// 14h: remote_qpn_or_multi_user_master_qp [23:0] (used when creating SLAVE QP)
+#define MU_MASTER_QPN_DWOFF QPC_DWORD_14h
+#define MU_MASTER_QPN_HI    23
+#define MU_MASTER_QPN_LO    0
+
+// 78h: multi_user_group_size [31:24]
+#define MU_GROUP_SIZE_DWOFF QPC_DWORD_78h
+#define MU_GROUP_SIZE_HI    31
+#define MU_GROUP_SIZE_LO    24
+
+/* Some DPDK headers reference MLX5_ASSERT; make it a no-op if missing. */
+#ifndef MLX5_ASSERT
+#define MLX5_ASSERT(x) do { (void)(x); } while (0)
+#endif
+
 #define MAX_TX_QUEUE_PER_PORT RTE_MAX_LCORE
 #define MAX_RX_QUEUE_PER_PORT 128
 
@@ -293,6 +334,207 @@ setup_l3fwd_lookup_tables(void)
 		l3fwd_lkp = l3fwd_lpm_lkp;
 }
 
+/***** Helper functions for setting up QP *****/
+
+static struct ibv_context *open_devx_ctx(const char *want_ib) {
+    int n = 0;
+    struct ibv_device **list = ibv_get_device_list(&n);
+    if (!list || n == 0) { fprintf(stderr, "Error: No RDMA devices.\n"); exit(1); }
+
+    struct ibv_context *ctx = NULL;
+    for (int i = 0; i < n; i++) {
+        const char *name = ibv_get_device_name(list[i]);
+        if (!name) continue;
+        if (want_ib && strcmp(want_ib, name)) continue;
+
+        struct mlx5dv_context_attr attr = { .flags = MLX5DV_CONTEXT_FLAGS_DEVX };
+        ctx = mlx5dv_open_device(list[i], &attr);
+        if (ctx) break;
+    }
+    ibv_free_device_list(list);
+    if (!ctx) { fprintf(stderr, "Error: Failed to open DevX ctx.\n"); exit(1); }
+    return ctx;
+}
+
+static uint32_t verbs_alloc_pdn(struct ibv_context *ctx, struct ibv_pd **out_pd)
+{
+    struct ibv_pd *pd = ibv_alloc_pd(ctx);
+    if (!pd) {
+        perror("ibv_alloc_pd");
+        return 0;
+    }
+
+    struct mlx5dv_obj dv = {0};
+    struct mlx5dv_pd dvpd = {0};
+    dv.pd.in  = pd;
+    dv.pd.out = &dvpd;
+
+    if (mlx5dv_init_obj(&dv, MLX5DV_OBJ_PD)) {
+        perror("mlx5dv_init_obj(PD)");
+        ibv_dealloc_pd(pd);
+        return 0;
+    }
+
+    if (out_pd) *out_pd = pd;           // hand PD back to caller for later free
+    return dvpd.pdn;                     // <-- use this in QPC: MLX5_SET(qpc, qpc, pd, pdn);
+}
+
+static struct mlx5dv_devx_uar *devx_alloc_uar(struct ibv_context *ctx) {
+    struct mlx5dv_devx_uar *uar = mlx5dv_devx_alloc_uar(ctx, 0);
+    if (!uar) { perror("mlx5dv_devx_alloc_uar"); exit(1); }
+    return uar;
+}
+
+static struct ibv_cq *verbs_create_cq(struct ibv_context *ctx, int depth) {
+    struct ibv_cq *cq = ibv_create_cq(ctx, depth, NULL, NULL, 0);
+    if (!cq) { perror("ibv_create_cq"); exit(1); }
+    return cq;
+}
+
+/* Correct in/out usage for mlx5dv_init_obj(CQ) */
+static uint32_t cq_get_cqn(struct ibv_cq *cq) {
+    struct mlx5dv_cq cq_out = {0};
+    struct mlx5dv_obj obj = {0};
+    obj.cq.in  = cq;
+    obj.cq.out = &cq_out;
+    if (mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ)) {
+        perror("mlx5dv_init_obj(CQ)");
+        exit(1);
+    }
+    return cq_out.cqn;
+}
+
+struct umem {
+    void *buf;
+    size_t len;
+    struct mlx5dv_devx_umem *umem;
+    uint64_t iova;
+};
+
+static void umem_make(struct ibv_context *ctx, struct umem *u, size_t len, int acc) {
+    if (posix_memalign(&u->buf, 4096, len)) { perror("posix_memalign"); exit(1); }
+    memset(u->buf, 0, len);
+    u->len = len;
+    u->umem = mlx5dv_devx_umem_reg(ctx, u->buf, len, acc);
+    if (!u->umem) { perror("mlx5dv_devx_umem_reg"); exit(1); }
+    u->iova = (uintptr_t)u->buf; // VA-as-IOVA on most setups
+}
+
+// ---- Set/Get field inside a single 32-bit QPC dword by PRM indices ----
+// PRM notation: Offset is in dwords (0h, 4h, 8h... => 0,4,8 bytes).
+// Bits are [hi:lo] inside that dword, with 31 = MSB, 0 = LSB.
+static inline void qpc_set_dword_field_be(uint8_t *qpc_base,
+                                          size_t dword_off_bytes,
+                                          int hi, int lo, uint32_t value)
+{
+    uint32_t be;
+    memcpy(&be, qpc_base + dword_off_bytes, 4);
+    uint32_t w = __builtin_bswap32(be);          // to host (word is BE in PRM)
+    const uint32_t width = (uint32_t)(hi - lo + 1);
+    const uint32_t mask  = (width == 32 ? 0xFFFFFFFFu : ((1u << width) - 1u)) << lo;
+    w = (w & ~mask) | ((value << lo) & mask);
+    be = __builtin_bswap32(w);
+    memcpy(qpc_base + dword_off_bytes, &be, 4);
+}
+
+static inline uint32_t qpc_get_dword_field_be(const uint8_t *qpc_base,
+                                              size_t dword_off_bytes,
+                                              int hi, int lo)
+{
+    uint32_t be;
+    memcpy(&be, qpc_base + dword_off_bytes, 4);
+    uint32_t w = __builtin_bswap32(be);
+    const uint32_t width = (uint32_t)(hi - lo + 1);
+    const uint32_t mask  = (width == 32 ? 0xFFFFFFFFu : ((1u << width) - 1u));
+    return (w >> lo) & mask;
+}
+
+static void verbs_free_pd(struct ibv_pd *pd)
+{
+    if (pd) ibv_dealloc_pd(pd);
+}
+
+/* Create Master MU QP */
+static struct mlx5dv_devx_obj *create_master_mu_qp(
+    struct ibv_context *ctx,
+    uint32_t pdn, uint32_t cqn_snd, uint32_t cqn_rcv,
+    uint32_t group_size,
+    uint64_t dbr_iova, uint64_t sq_iova, uint64_t rq_iova,
+    uint32_t log_sq, uint32_t log_rq, uint32_t *qpn, int uar_page_id)
+{
+
+    /* DevX talks to the NIC by sending admin commands. Each command has:
+   * - An input buffer (in) you fill and pass to the driver/NIC, and
+   * - An output buffer (out) that the driver/NIC fills with the reply
+   *
+   * CREATE_QP:
+   * - in: opcode + a fully populated QPC (Queue Pair Context)
+   * - out: status/syndrome + the created QPN/object ID (and any other return fields)
+   *
+   * Notes:
+   * - The layouts are packed, big-endian, 32-bit rows (PRM convention).
+   * - The first dwords of out usually contain a status and syndrome (0 = OK)
+   * - Sizes come from macros like MLX5_ST_SZ_BYTES(create_qp_in) so you don’t guess.
+   */
+
+    uint8_t in[MLX5_ST_SZ_BYTES(create_qp_in)]   = {0};
+    uint8_t out[MLX5_ST_SZ_BYTES(create_qp_out)] = {0};
+
+    MLX5_SET(create_qp_in, in, opcode, MLX5_CMD_OP_CREATE_QP);
+
+    void *qpc = MLX5_ADDR_OF(create_qp_in, in, qpc);
+    //MLX5_SET(qpc, qpc, st, 0);      // RC
+    MLX5_SET(qpc, qpc, pd, pdn);
+    MLX5_SET(qpc, qpc, cqn_snd, cqn_snd);
+    MLX5_SET(qpc, qpc, cqn_rcv, cqn_rcv);
+    MLX5_SET(qpc, qpc, log_sq_size, log_sq);
+    MLX5_SET(qpc, qpc, log_rq_size, log_rq);
+
+
+    /* LOG:
+     * Issue (24.10.25):
+     * In order to create master multi-user QP, the spec instructs to set multi_user_qp_type to MULTI_USER_MASTER_QP = 0x1
+     * When setting this parameter, the QP creation fails with an error:
+     *   Error: CREATE_QP failed: status=0 syndrome=0x00000000
+     *   Master MU QP creation failed (see status/syndrome above).
+     *
+     * Note: When setting this parameter to SINGLE_USER_QP = 0x0, QP creation succeeds.
+     *
+     * Solution (25.10.25):
+     * Forgot to set multi_user_group_size = group_size. It failed because it is zero by default. Creating muqp with groupsize=0
+     * is illegal.
+     */
+    qpc_set_dword_field_be(qpc, MUQP_TYPE_DWOFF, MUQP_TYPE_HI, MUQP_TYPE_LO, 0x1 /* MULTI_USER_MASTER_QP */);
+    qpc_set_dword_field_be(qpc, MU_GROUP_SIZE_DWOFF, MU_GROUP_SIZE_HI, MU_GROUP_SIZE_LO, group_size /* MULTI_USER_GROUP_SIZE */);
+    qpc_set_dword_field_be(qpc, UAR_PAGE_ID_DWOFF, UAR_PAGE_ID_HI, UAR_PAGE_ID_LO, uar_page_id /* uar_page */);
+
+
+    /* Required: doorbell record */
+    MLX5_SET64(qpc, qpc, dbr_addr, dbr_iova);
+    uint32_t muqp = qpc_get_dword_field_be(qpc, MUQP_TYPE_DWOFF, MUQP_TYPE_HI, MUQP_TYPE_LO);
+    uint32_t mu_group_size = qpc_get_dword_field_be(qpc, MU_GROUP_SIZE_DWOFF, MU_GROUP_SIZE_HI, MU_GROUP_SIZE_LO);
+    uint32_t offload = qpc_get_dword_field_be(qpc, OFFLOAD_TYPE_DWOFF, OFFLOAD_TYPE_HI, OFFLOAD_TYPE_LO);
+    printf("QPC.muqp_type=%u, mu_group_size=%u, offload_type=%u\n", muqp, mu_group_size, offload);
+
+    /* Common flags */
+    MLX5_SET(qpc, qpc, pm_state, 0); // MIGRATED
+    MLX5_SET(qpc, qpc, rre, 1);
+    MLX5_SET(qpc, qpc, rwe, 1);
+
+    struct mlx5dv_devx_obj *qp =
+        mlx5dv_devx_obj_create(ctx, in, sizeof(in), out, sizeof(out));
+	//printf("QP Number: %u\n", qp->object_id);
+    if (!qp) {
+        uint32_t st  = MLX5_GET(create_qp_out, out, status);
+        uint32_t syn = MLX5_GET(create_qp_out, out, syndrome);
+        fprintf(stderr, "Error: CREATE_QP failed: status=%u syndrome=0x%08x\n", st, syn);
+        return NULL;
+    }
+
+    *qpn = MLX5_GET(create_qp_out, out, qpn);
+
+    return qp;
+}
 static int
 check_lcore_params(void)
 {
@@ -1310,6 +1552,7 @@ l3fwd_poll_resource_setup(void)
 	unsigned int nb_ports;
 	unsigned int lcore_id;
 	int ret;
+	uint8_t muqp_master_flag = 0;
 
 	if (check_lcore_params() < 0)
 		rte_exit(EXIT_FAILURE, "check_lcore_params failed\n");
@@ -1438,6 +1681,11 @@ l3fwd_poll_resource_setup(void)
 
 		/* init one TX queue per couple (lcore,port) */
 		queueid = 0;
+
+		struct ibv_context *ctx = open_devx_ctx(NULL);
+		struct ibv_pd *pd = NULL;
+		uint32_t group_size = 2;
+
 		for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
 			if (rte_lcore_is_enabled(lcore_id) == 0)
 				continue;
@@ -1453,12 +1701,58 @@ l3fwd_poll_resource_setup(void)
 
 			txconf = &dev_info.default_txconf;
 			txconf->offloads = local_port_conf.txmode.offloads;
+
+			/*
+			// Create a single Master QP
 			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
-						     socketid, txconf);
+				socketid, txconf);
+
 			if (ret < 0)
 				rte_exit(EXIT_FAILURE,
-					"rte_eth_tx_queue_setup: err=%d, "
-					"port=%d\n", ret, portid);
+	     "rte_eth_tx_queue_setup: err=%d, "
+	     "port=%d\n", ret, portid);
+	     */
+
+			if (!muqp_master_flag) {
+
+				uint32_t pdn = verbs_alloc_pdn(ctx, &pd);
+				if (!pdn) { fprintf(stderr, "Failed to get PDN via verbs\n"); exit(1); }
+
+				struct mlx5dv_devx_uar *uar = devx_alloc_uar(ctx); // keep UAR for runtime DBs; your create_qp_in has no uar field
+				uint32_t uar_page_id = uar->page_id;
+
+				struct ibv_cq *cq_snd = verbs_create_cq(ctx, 1024);
+				struct ibv_cq *cq_rcv = verbs_create_cq(ctx, 1024);
+				uint32_t cqn_snd = cq_get_cqn(cq_snd);
+				uint32_t cqn_rcv = cq_get_cqn(cq_rcv);
+
+				struct umem um_sq, um_rq, um_dbr;
+				int umem_acc = IBV_ACCESS_LOCAL_WRITE;
+				umem_make(ctx, &um_sq,  1u << 16, umem_acc);
+				umem_make(ctx, &um_rq,  1u << 16, umem_acc);
+				umem_make(ctx, &um_dbr, 4096,     umem_acc);
+
+				uint32_t qpn;
+				struct mlx5dv_devx_obj *qp = create_master_mu_qp(
+					ctx, pdn, cqn_snd, cqn_rcv,
+					group_size,
+					um_dbr.iova, um_sq.iova, um_rq.iova,
+					/*log_sq*/10, /*log_rq*/10, &qpn, uar_page_id);
+
+				if (qp) {
+					printf("Master MU QP created successfully.\n");
+					printf("QP Number: %u\n", qpn);
+
+				}
+				else    printf("Master MU QP creation failed (see status/syndrome above).\n");
+				muqp_master_flag = 1;
+			} else {
+				// Create Slave QPs
+
+
+			}
+
+
 
 			qconf = &lcore_conf[lcore_id];
 			qconf->tx_queue_id[portid] = queueid;

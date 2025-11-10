@@ -319,6 +319,9 @@ rte_lpm_lookup(const struct rte_lpm *lpm, uint32_t ip, uint32_t *next_hop)
 	}
 
 	*next_hop = ((uint32_t)tbl_entry & 0x00FFFFFF);
+
+	printf("Table entry: %x, IP: %x, next_hop: %x, LOOKUP_SUCCESS: %d\n",tbl_entry,ip,*next_hop, (tbl_entry & RTE_LPM_LOOKUP_SUCCESS));
+
 	return (tbl_entry & RTE_LPM_LOOKUP_SUCCESS) ? 0 : -ENOENT;
 }
 

@@ -22,3 +22,8 @@ if dpdk_conf.has('RTE_LIB_EVENTDEV')
     deps += 'eventdev'
 endif
 cflags += no_wvla_cflag
+
+includes += [
+  include_directories('../../drivers/common/mlx5'),
+  include_directories('../../drivers/common/mlx5/linux'),
+]
