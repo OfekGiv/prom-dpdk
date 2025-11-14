@@ -1559,12 +1559,6 @@ mlx5_shared_dev_ctx_args_config(struct mlx5_dev_ctx_shared *sh,
 			"LRO minimal size of TCP segment required for coalescing is %d bytes.",
 			sh->cdev->config.hca_attr.lro_min_mss_size);
 	}
-	/* Check if MUQP is supported when user calls for MUQP */
-	if (!sh->cdev->config.hca_attr.max_multi_user_group_size && sh->cdev->config.muqp_size) {
-		DRV_LOG(ERR, "MUQP is not supported.");
-		rte_errno = ENODEV;
-		return -rte_errno;
-	}
 	/*
 	 * If HW has bug working with tunnel packet decapsulation and scatter
 	 * FCS, and decapsulation is needed, clear the hw_fcs_strip bit.

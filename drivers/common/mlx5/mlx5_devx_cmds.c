@@ -1109,9 +1109,6 @@ mlx5_devx_cmd_query_hca_attr(void *ctx,
 			flow_access_aso_opc_mod);
 	attr->wqe_based_flow_table_sup = MLX5_GET(cmd_hca_cap, hcattr,
 			wqe_based_flow_table_update_cap);
-	attr->max_multi_user_group_size = MLX5_GET(cmd_hca_cap, hcattr,
-			max_multi_user_ggroup_size);
-	printf(">>>>>> max group size = %u\n", attr->max_multi_user_group_size);
 	/*
 	 * Flex item support needs max_num_prog_sample_field
 	 * from the Capabilities 2 table for PARSE_GRAPH_NODE
@@ -1424,10 +1421,6 @@ mlx5_devx_cmd_query_hca_attr(void *ctx,
 		reg_c_8_15 = MLX5_GET(flow_table_esw_cap, hcattr,
 				      ft_field_support_2_esw_fdb.metadata_reg_c_8_15);
 		attr->set_reg_c &= ((0xff & reg_c_8_15) << 8) | esw_reg;
-	}
-	if (attr->max_multi_user_group_size) {
-
-
 	}
 	return 0;
 error:

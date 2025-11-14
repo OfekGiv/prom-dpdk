@@ -403,31 +403,18 @@ mlx5_tx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 		container_of(txq, struct mlx5_txq_ctrl, txq);
 	int res;
 
-	int muqp_size = priv->sh->cdev->config.muqp_size;
-
 	res = mlx5_tx_queue_pre_setup(dev, idx, &desc);
 	if (res)
 		return res;
-	if (muqp_size == 0){
-		txq_ctrl = mlx5_txq_new(dev, idx, desc, socket, conf);
-		if (!txq_ctrl) {
-			DRV_LOG(ERR, "port %u unable to allocate queue index %u",
-			   				dev->data->port_id, idx);
-			return -rte_errno;
-		}
-		DRV_LOG(DEBUG, "port %u adding Tx queue %u to list",
-						  dev->data->port_id, idx);
-		(*priv->txqs)[idx] = &txq_ctrl->txq;
-	} else {
-		if (idx == 0) {
-			mlx5_tx_create_master_qp();
-		}
-		else {
-			mlx5_tx_create_slave_qp();
-		}
+	txq_ctrl = mlx5_txq_new(dev, idx, desc, socket, conf);
+	if (!txq_ctrl) {
+		DRV_LOG(ERR, "port %u unable to allocate queue index %u",
+			dev->data->port_id, idx);
+		return -rte_errno;
 	}
-
-
+	DRV_LOG(DEBUG, "port %u adding Tx queue %u to list",
+		dev->data->port_id, idx);
+	(*priv->txqs)[idx] = &txq_ctrl->txq;
 	return 0;
 }
 

@@ -58,11 +58,6 @@ uint8_t haswell_broadwell_cpu;
  */
 #define MLX5_SQ_DB_NC "sq_db_nc"
 
-/*
- * Enable Multi-User-Queue-Pair.
- */
-#define MLX5_MUQP_EN "muqp"
-
 /* In case this is an x86_64 intel processor to check if
  * we should use relaxed ordering.
  */
@@ -317,9 +312,6 @@ mlx5_common_args_check_handler(const char *key, const char *val, void *opaque)
 		config->pd_handle = tmp;
 	} else if (strcmp(key, MLX5_PROBE_OPT) == 0) {
 		config->probe_opt = !!tmp;
-	} else if (strcmp(key, MLX5_MUQP_EN) == 0 ) {
-		config->muqp_size = tmp;
-		printf(">>>>>> MUQP Enabled. size = %lu\n",tmp);
 	}
 	return 0;
 }
@@ -350,7 +342,6 @@ mlx5_common_config_get(struct mlx5_kvargs_ctrl *mkvlist,
 		MLX5_DEVICE_FD,
 		MLX5_PD_HANDLE,
 		MLX5_PROBE_OPT,
-		MLX5_MUQP_EN,
 		NULL,
 	};
 	int ret = 0;
@@ -363,7 +354,6 @@ mlx5_common_config_get(struct mlx5_kvargs_ctrl *mkvlist,
 	config->dbnc = MLX5_ARG_UNSET;
 	config->device_fd = MLX5_ARG_UNSET;
 	config->pd_handle = MLX5_ARG_UNSET;
-	config->muqp_size = 0;
 	if (mkvlist == NULL)
 		return 0;
 	/* Process common parameters. */
@@ -921,12 +911,6 @@ mlx5_common_probe_again_args_validate(struct mlx5_common_device *cdev,
 		goto error;
 	}
 	if (cdev->config.dbnc != config->dbnc) {
-		DRV_LOG(ERR, "\"" MLX5_SQ_DB_NC "\" "
-			"configuration mismatch for device %s.",
-			cdev->dev->name);
-		goto error;
-	}
-	if (cdev->config.muqp_size != config->muqp_size) {
 		DRV_LOG(ERR, "\"" MLX5_SQ_DB_NC "\" "
 			"configuration mismatch for device %s.",
 			cdev->dev->name);
