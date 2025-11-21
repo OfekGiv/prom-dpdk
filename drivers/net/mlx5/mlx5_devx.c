@@ -1531,6 +1531,27 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 #endif
 
 /**
+ * Create the QP DevX object
+ *
+ *
+ *
+ *
+ */
+
+int
+mlx5_qp_devx_obj_new(struct rte_eth_dev *dev)
+{
+	// Create CQ (master only)
+
+
+	//Allocate UAR for DBR
+
+
+}
+
+
+
+/**
  * Create the Tx queue DevX object.
  *
  * @param dev

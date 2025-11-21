@@ -130,8 +130,11 @@ struct __rte_cache_aligned rte_eth_dev_data {
 
 	void **rx_queues; /**< Array of pointers to Rx queues */
 	void **tx_queues; /**< Array of pointers to Tx queues */
+	void **qps; /**< Array of pointers to QPs */
+
 	uint16_t nb_rx_queues; /**< Number of Rx queues */
 	uint16_t nb_tx_queues; /**< Number of Tx queues */
+	uint16_t nb_qps; /**< Number of QPs */
 
 	struct rte_eth_dev_sriov sriov;    /**< SRIOV data */
 

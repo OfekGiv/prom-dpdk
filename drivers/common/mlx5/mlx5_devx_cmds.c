@@ -2632,9 +2632,9 @@ mlx5_devx_cmd_create_qp(void *ctx,
 				MLX5_SET(qpc, qpc, cd_slave_send, attr->cd_slave_send);
 			if (attr->cd_slave_recv)
 				MLX5_SET(qpc, qpc, cd_slave_receive, attr->cd_slave_recv);
+			MLX5_SET(qpc, qpc, multi_user_qp_type, MLX5_SINGLE_USER_QP);
 			MLX5_SET64(qpc, qpc, dbr_addr, attr->dbr_address);
 			MLX5_SET64(create_qp_in, in, wq_umem_offset, attr->wq_umem_offset);
-			MLX5_SET(qpc, qpc, multi_user_qp_type, MLX5_SINGLE_USER_QP);
 			MLX5_SET(create_qp_in, in, wq_umem_id, attr->wq_umem_id);
 			MLX5_SET(create_qp_in, in, wq_umem_valid, 1);
 		} else if (attr->multi_user_qp_type == MLX5_MULTI_USER_MASTER_QP){
