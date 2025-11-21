@@ -2604,42 +2604,86 @@ mlx5_devx_cmd_create_qp(void *ctx,
 		if (attr->log_page_size > MLX5_ADAPTER_PAGE_SHIFT)
 			MLX5_SET(qpc, qpc, log_page_size,
 				 attr->log_page_size - MLX5_ADAPTER_PAGE_SHIFT);
-		if (attr->num_of_send_wqbbs) {
-			MLX5_ASSERT(RTE_IS_POWER_OF_2(attr->num_of_send_wqbbs));
-			MLX5_SET(qpc, qpc, cqn_snd, attr->cqn);
-			MLX5_SET(qpc, qpc, log_sq_size,
-				 rte_log2_u32(attr->num_of_send_wqbbs));
-		} else {
+
+		if (attr->multi_user_qp_type == MLX5_SINGLE_USER_QP) {
+			if (attr->num_of_send_wqbbs) {
+				MLX5_ASSERT(RTE_IS_POWER_OF_2(attr->num_of_send_wqbbs));
+				MLX5_SET(qpc, qpc, cqn_snd, attr->cqn);
+				MLX5_SET(qpc, qpc, log_sq_size, rte_log2_u32(attr->num_of_send_wqbbs));
+			} else {
+				MLX5_SET(qpc, qpc, no_sq, 1);
+			}
+			if (attr->num_of_receive_wqes) {
+				MLX5_ASSERT(RTE_IS_POWER_OF_2(attr->num_of_receive_wqes));
+				MLX5_SET(qpc, qpc, cqn_rcv, attr->cqn);
+				MLX5_SET(qpc, qpc, log_rq_stride, attr->log_rq_stride - MLX5_LOG_RQ_STRIDE_SHIFT);
+				MLX5_SET(qpc, qpc, log_rq_size, rte_log2_u32(attr->num_of_receive_wqes));
+				MLX5_SET(qpc, qpc, rq_type, MLX5_NON_ZERO_RQ);
+			} else {
+				MLX5_SET(qpc, qpc, rq_type, MLX5_ZERO_LEN_RQ);
+			}
+			if (attr->dbr_umem_valid) {
+				MLX5_SET(qpc, qpc, dbr_umem_valid, attr->dbr_umem_valid);
+				MLX5_SET(qpc, qpc, dbr_umem_id, attr->dbr_umem_id);
+			}
+			if (attr->cd_master)
+				MLX5_SET(qpc, qpc, cd_master, attr->cd_master);
+			if (attr->cd_slave_send)
+				MLX5_SET(qpc, qpc, cd_slave_send, attr->cd_slave_send);
+			if (attr->cd_slave_recv)
+				MLX5_SET(qpc, qpc, cd_slave_receive, attr->cd_slave_recv);
+			MLX5_SET64(qpc, qpc, dbr_addr, attr->dbr_address);
+			MLX5_SET64(create_qp_in, in, wq_umem_offset, attr->wq_umem_offset);
+			MLX5_SET(qpc, qpc, multi_user_qp_type, MLX5_SINGLE_USER_QP);
+			MLX5_SET(create_qp_in, in, wq_umem_id, attr->wq_umem_id);
+			MLX5_SET(create_qp_in, in, wq_umem_valid, 1);
+		} else if (attr->multi_user_qp_type == MLX5_MULTI_USER_MASTER_QP){
+			if (attr->num_of_send_wqbbs) {
+				MLX5_ASSERT(RTE_IS_POWER_OF_2(attr->num_of_send_wqbbs));
+				MLX5_SET(qpc, qpc, cqn_snd, attr->cqn);
+				MLX5_SET(qpc, qpc, log_sq_size, rte_log2_u32(attr->num_of_send_wqbbs));
+			} else {
+				MLX5_SET(qpc, qpc, no_sq, 1);
+			}
+			if (attr->num_of_receive_wqes) {
+				MLX5_ASSERT(RTE_IS_POWER_OF_2(attr->num_of_receive_wqes));
+				MLX5_SET(qpc, qpc, cqn_rcv, attr->cqn);
+				MLX5_SET(qpc, qpc, log_rq_stride, attr->log_rq_stride - MLX5_LOG_RQ_STRIDE_SHIFT);
+				MLX5_SET(qpc, qpc, log_rq_size, rte_log2_u32(attr->num_of_receive_wqes));
+				MLX5_SET(qpc, qpc, rq_type, MLX5_NON_ZERO_RQ);
+			} else {
+				MLX5_SET(qpc, qpc, rq_type, MLX5_ZERO_LEN_RQ);
+			}
+			if (attr->dbr_umem_valid) {
+				MLX5_SET(qpc, qpc, dbr_umem_valid, attr->dbr_umem_valid);
+				MLX5_SET(qpc, qpc, dbr_umem_id, attr->dbr_umem_id);
+			}
+			if (attr->cd_master)
+				MLX5_SET(qpc, qpc, cd_master, attr->cd_master);
+			MLX5_SET64(qpc, qpc, dbr_addr, attr->dbr_address);
+			MLX5_SET64(create_qp_in, in, wq_umem_offset, attr->wq_umem_offset);
+			MLX5_SET(create_qp_in, in, wq_umem_id, attr->wq_umem_id);
+			MLX5_SET(create_qp_in, in, wq_umem_valid, 1);
+			MLX5_SET(qpc, qpc, multi_user_qp_type, MLX5_MULTI_USER_MASTER_QP);
+			MLX5_SET(qpc, qpc, multi_user_group_size, attr->multi_user_group_size);
+			MLX5_SET(qpc, qpc, offload_type, MLX5_OFFLOAD_TYPE_NONE);
+		} else if (attr->multi_user_qp_type == MLX5_MULTI_USER_SLAVE_QP) {
+			if (attr->dbr_umem_valid) {
+				MLX5_SET(qpc, qpc, dbr_umem_valid, attr->dbr_umem_valid);
+				MLX5_SET(qpc, qpc, dbr_umem_id, attr->dbr_umem_id);
+			}
+			if (attr->cd_slave_send)
+				MLX5_SET(qpc, qpc, cd_slave_send, attr->cd_slave_send);
+			if (attr->cd_slave_recv)
+				MLX5_SET(qpc, qpc, cd_slave_receive, attr->cd_slave_recv);
+			MLX5_SET64(qpc, qpc, dbr_addr, attr->dbr_address);
+			MLX5_SET(qpc, qpc, multi_user_qp_type, MLX5_MULTI_USER_SLAVE_QP);
+			MLX5_SET(qpc, qpc, remote_qpn, attr->remote_qpn_or_multi_user_master_qp);
 			MLX5_SET(qpc, qpc, no_sq, 1);
-		}
-		if (attr->num_of_receive_wqes) {
-			MLX5_ASSERT(RTE_IS_POWER_OF_2(
-					attr->num_of_receive_wqes));
-			MLX5_SET(qpc, qpc, cqn_rcv, attr->cqn);
-			MLX5_SET(qpc, qpc, log_rq_stride, attr->log_rq_stride -
-				 MLX5_LOG_RQ_STRIDE_SHIFT);
-			MLX5_SET(qpc, qpc, log_rq_size,
-				 rte_log2_u32(attr->num_of_receive_wqes));
-			MLX5_SET(qpc, qpc, rq_type, MLX5_NON_ZERO_RQ);
-		} else {
 			MLX5_SET(qpc, qpc, rq_type, MLX5_ZERO_LEN_RQ);
+			MLX5_SET(qpc, qpc, offload_type, MLX5_OFFLOAD_TYPE_NONE);
 		}
-		if (attr->dbr_umem_valid) {
-			MLX5_SET(qpc, qpc, dbr_umem_valid,
-				 attr->dbr_umem_valid);
-			MLX5_SET(qpc, qpc, dbr_umem_id, attr->dbr_umem_id);
-		}
-		if (attr->cd_master)
-			MLX5_SET(qpc, qpc, cd_master, attr->cd_master);
-		if (attr->cd_slave_send)
-			MLX5_SET(qpc, qpc, cd_slave_send, attr->cd_slave_send);
-		if (attr->cd_slave_recv)
-			MLX5_SET(qpc, qpc, cd_slave_receive, attr->cd_slave_recv);
-		MLX5_SET64(qpc, qpc, dbr_addr, attr->dbr_address);
-		MLX5_SET64(create_qp_in, in, wq_umem_offset,
-			   attr->wq_umem_offset);
-		MLX5_SET(create_qp_in, in, wq_umem_id, attr->wq_umem_id);
-		MLX5_SET(create_qp_in, in, wq_umem_valid, 1);
+
 	} else {
 		/* Special QP to be managed by FW - no SQ\RQ\CQ\UAR\DB rec. */
 		MLX5_SET(qpc, qpc, rq_type, MLX5_ZERO_LEN_RQ);

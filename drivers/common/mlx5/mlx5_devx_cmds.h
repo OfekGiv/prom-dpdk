@@ -584,6 +584,9 @@ struct mlx5_devx_qp_attr {
 	uint32_t cd_master:1;
 	uint32_t cd_slave_send:1;
 	uint32_t cd_slave_recv:1;
+	uint32_t multi_user_qp_type:2;
+	uint32_t multi_user_group_size:8;
+	uint32_t remote_qpn_or_multi_user_master_qp:24;
 };
 
 struct mlx5_devx_virtio_q_couners_attr {

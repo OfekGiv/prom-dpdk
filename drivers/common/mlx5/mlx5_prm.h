@@ -4295,6 +4295,20 @@ enum {
 	MLX5_ZERO_LEN_RQ = 0x3,
 };
 
+/* QP types */
+enum {
+	MLX5_SINGLE_USER_QP = 0x0,
+	MLX5_MULTI_USER_MASTER_QP = 0x1,
+	MLX5_MULTI_USER_SLAVE_QP = 0x2,
+};
+
+/* Offload type */
+enum {
+	MLX5_OFFLOAD_TYPE_NONE = 0x0,
+	MLX5_OFFLOAD_TYPE_RNDV = 0x1,
+	MLX5_OFFLOAD_TYPE_NVME = 0x2,
+};
+
 struct mlx5_ifc_ads_bits {
 	u8 fl[0x1];
 	u8 free_ar[0x1];
@@ -4340,7 +4354,7 @@ struct mlx5_ifc_qpc_bits {
 	u8 req_e2e_credit_mode[0x2];
 	u8 offload_type[0x4];
 	u8 end_padding_mode[0x2];
-	u8 reserved_at_1e[0x2];
+	u8 multi_user_qp_type[0x2];
 	u8 wq_signature[0x1];
 	u8 block_lb_mc[0x1];
 	u8 atomic_like_write_en[0x1];
@@ -4382,7 +4396,7 @@ struct mlx5_ifc_qpc_bits {
 	u8 cur_retry_count[0x3];
 	u8 reserved_at_39b[0x5];
 	u8 reserved_at_3a0[0x20];
-	u8 reserved_at_3c0[0x8];
+	u8 multi_user_group_size[0x8];
 	u8 next_send_psn[0x18];
 	u8 reserved_at_3e0[0x8];
 	u8 cqn_snd[0x18];

@@ -436,6 +436,64 @@ mlx5_devx_qp_create(void *ctx, struct mlx5_devx_qp *qp_obj, uint32_t queue_size,
 		rte_errno = ENOMEM;
 		return -rte_errno;
 	}
+
+	/*
+	 * MUQP SLAVE:
+	 *  - No own WQ (no SQ/RQ UMEM)
+	 *  - But it DOES have a doorbell record.
+	 *  - So we allocate a minimal UMEM that only holds the DBR.
+	 */
+	if (attr->multi_user_qp_type == MLX5_MULTI_USER_SLAVE_QP) {
+		umem_size = MLX5_DBR_SIZE;
+		umem_dbrec = 0; /* DBR at start of the buffer */
+
+		umem_buf = mlx5_malloc(MLX5_MEM_RTE | MLX5_MEM_ZERO,
+				       umem_size, alignment, socket);
+		if (!umem_buf) {
+			DRV_LOG(ERR, "Failed to allocate memory for MUQP slave DBR.");
+			rte_errno = ENOMEM;
+			return -rte_errno;
+		}
+		/* Register only the DBR buffer as UMEM. */
+		umem_obj = mlx5_os_umem_reg(ctx, (void *)(uintptr_t)umem_buf,
+					    umem_size, IBV_ACCESS_LOCAL_WRITE);
+		if (!umem_obj) {
+			DRV_LOG(ERR, "Failed to register umem for MUQP slave DBR.");
+			rte_errno = errno;
+			goto error;
+		}
+
+		/* For slave:
+		 *  - No WQ UMEM: keep wq_umem_* at 0.
+		 *  - DBR lives in its own UMEM.
+		 */
+		attr->wq_umem_id = 0;
+		attr->wq_umem_offset = 0;
+		attr->dbr_umem_valid = 1;
+		attr->dbr_umem_id = mlx5_os_get_umem_id(umem_obj);
+		attr->dbr_address = umem_dbrec;
+		attr->log_page_size = MLX5_LOG_PAGE_SIZE; /* mostly irrelevant here */
+
+		qp = mlx5_devx_cmd_create_qp(ctx, attr);
+		if (!qp) {
+			DRV_LOG(ERR, "Can't create DevX MUQP slave QP object.");
+			rte_errno = ENOMEM;
+			goto error;
+		}
+
+		memset(qp_obj, 0, sizeof(*qp_obj));
+		qp_obj->umem_buf = umem_buf;
+		qp_obj->umem_obj = umem_obj;
+		qp_obj->qp = qp;
+		qp_obj->db_rec = RTE_PTR_ADD(qp_obj->umem_buf, umem_dbrec);
+		return 0;
+	}
+
+	/*
+	 * SINGLE-USER and MUQP MASTER:
+	 *  - Original behavior: one UMEM holds WQEs + DBR.
+	 */
+
 	/* Allocate memory buffer for WQEs and doorbell record. */
 	umem_size = queue_size;
 	umem_dbrec = RTE_ALIGN(umem_size, MLX5_DBR_SIZE);
