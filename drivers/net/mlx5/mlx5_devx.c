@@ -1539,13 +1539,31 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
  */
 
 int
-mlx5_qp_devx_obj_new(struct rte_eth_dev *dev)
+mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 {
-	// Create CQ (master only)
 
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_qp_data *qp_data = (*priv->qps)[idx];
+
+	/* Create completion queue object with DevX. */
+	ret = mlx5_devx_cq_create(sh->cdev->ctx, &txq_obj->cq_obj, log_desc_n,
+				  &cq_attr, priv->sh->numa_node);
+	if (ret) {
+		DRV_LOG(ERR, "Port %u Tx queue %u CQ creation failure.",
+			dev->data->port_id, idx);
+		goto error;
+	}
+	txq_data->cqe_n = log_desc_n;
+	txq_data->cqe_s = cqe_n;
+	txq_data->cqe_m = txq_data->cqe_s - 1;
+	txq_data->cqes = txq_obj->cq_obj.cqes;
+	txq_data->cq_ci = 0;
+	txq_data->cq_pi = 0;
+	txq_data->cq_db = txq_obj->cq_obj.db_rec;
+	*txq_data->cq_db = 0;
 
 	//Allocate UAR for DBR
-
+	mlx5_devx_qp_create(
 
 }
 
