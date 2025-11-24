@@ -14,83 +14,99 @@
 #include <mlx5_common.h>
 #include <mlx5_common_mr.h>
 
+#include "generic/rte_spinlock.h"
 #include "mlx5.h"
 #include "mlx5_autoconf.h"
 #include "mlx5_rxtx.h"
 #include "mlx5_trace.h"
 
-__extension__
-struct elts {
-	uint16_t elts_head; /* Current counter in (*elts)[]. */
-	uint16_t elts_tail; /* Counter of first element awaiting completion. */
-	uint16_t elts_comp; /* elts index since last completion request. */
-	uint16_t elts_s; /* Number of mbuf elements. */
-	uint16_t elts_m; /* Mask for mbuf elements indices. */
+enum mlx5_qp_dir {
+	MLX5_QP_DIR_TX = 1 << 0,
+	MLX5_QP_DIR_RX = 1 << 1,
+	MLX5_QP_DIR_TXRQ = MLX5_QP_DIR_TX | MLX5_QP_DIR_RX,
 };
 
 /* TX queue descriptor. */
 __extension__
 struct __rte_cache_aligned mlx5_qp_data {
-	struct elts sq_elts;
-	struct elts rq_elts;
-	/* Fields related to sq/rq elts mbuf storage. */
-	uint16_t wqe_ci; /* Consumer index for work queue. */
-	uint16_t wqe_pi; /* Producer index for work queue. */
-	uint16_t wqe_s; /* Number of WQ elements. */
-	uint16_t wqe_m; /* Mask Number for WQ elements. */
-	uint16_t wqe_comp; /* WQE index since last completion request. */
-	uint16_t wqe_thres; /* WQE threshold to request completion in CQ. */
-	/* WQ related fields. */
-	uint16_t cq_ci; /* Consumer index for completion queue. */
-	uint16_t cq_pi; /* Production index for completion queue. */
-	uint16_t cqe_s; /* Number of CQ elements. */
-	uint16_t cqe_m; /* Mask for CQ indices. */
-	/* CQ related fields. */
-	uint16_t elts_n:4; /* elts[] length (in log2). */
-	uint16_t cqe_n:4; /* Number of CQ elements (in log2). */
-	uint16_t wqe_n:4; /* Number of WQ elements (in log2). */
-	uint16_t tso_en:1; /* When set hardware TSO is enabled. */
-	uint16_t tunnel_en:1;
-	/* When set TX offload for tunneled packets are supported. */
-	uint16_t swp_en:1; /* Whether SW parser is enabled. */
-	uint16_t vlan_en:1; /* VLAN insertion in WQE is supported. */
-	uint16_t db_nc:1; /* Doorbell mapped to non-cached region. */
-	uint16_t db_heu:1; /* Doorbell heuristic write barrier. */
-	uint16_t rt_timestamp:1; /* Realtime timestamp format. */
-	uint16_t wait_on_time:1; /* WQE with timestamp is supported. */
-	uint16_t fast_free:1; /* mbuf fast free on Tx is enabled. */
-	uint16_t inlen_send; /* Ordinary send data inline size. */
-	uint16_t inlen_empw; /* eMPW max packet size to inline. */
-	uint16_t inlen_mode; /* Minimal data length to inline. */
-	uint8_t tx_aggr_affinity; /* TxQ affinity configuration. */
-	uint32_t qp_num_8s; /* QP number shifted by 8. */
-	uint32_t sq_mem_len; /* Length of TxQ for WQEs */
-	uint64_t offloads; /* Offloads for Tx Queue. */
-	struct mlx5_mr_ctrl mr_ctrl; /* MR control descriptor. */
-	struct mlx5_wqe *wqes; /* Work queue. */
-	struct mlx5_wqe *wqes_end; /* Work queue array limit. */
-#ifdef RTE_LIBRTE_MLX5_DEBUG
-	uint32_t *fcqs; /* Free completion queue (debug extended). */
-#else
-	uint16_t *fcqs; /* Free completion queue. */
-#endif
-	volatile struct mlx5_cqe *cqes; /* Completion queue. */
-	volatile uint32_t *qp_db; /* Work queue doorbell. */
-	volatile uint32_t *cq_db; /* Completion queue doorbell. */
-	uint16_t port_id; /* Port ID of device. */
-	uint16_t idx; /* Queue index. */
-	uint64_t rt_timemask; /* Scheduling timestamp mask. */
-	uint64_t ts_mask; /* Timestamp flag dynamic mask. */
-	uint64_t ts_last; /* Last scheduled timestamp. */
-	int32_t ts_offset; /* Timestamp field dynamic offset. */
-	uint32_t cq_mem_len; /* Length of TxQ for CQEs */
-	struct mlx5_dev_ctx_shared *sh; /* Shared context. */
-	struct mlx5_txq_stats stats; /* TX queue counters. */
-	struct mlx5_txq_stats stats_reset; /* stats on last reset. */
+
+	/* Identity */
+	uint32_t qp_num; /* QP number */
+	uint16_t port_id;
+	uint16_t qp_idx; /* QP index in qps[] array */
+
+	/* Direction */
+	uint8_t has_sq;
+	uint8_t has_rq;
+
+	/* SQ / send WQ. */
+	uint16_t sq_wqe_ci; /* Consumer index for work queue. */
+	uint16_t sq_wqe_pi; /* Producer index for work queue. */
+	uint16_t sq_wqe_s; /* Number of WQ elements. */
+	uint16_t sq_wqe_m; /* Mask Number for WQ elements. */
+	uint16_t sq_wqe_n; /* Number of WQ elements (in log2). */
+	struct mlx5_wqe *sq_wqes;
+	struct mlx5_wqe *sq_wqes_end;
+	uint32_t sq_mem_len;
+	/* RQ / recv WQ. */
+	uint16_t rq_wqe_ci; /* Consumer index for work queue. */
+	uint16_t rq_wqe_pi; /* Producer index for work queue. */
+	uint16_t rq_wqe_s; /* Number of WQ elements. */
+	uint16_t rq_wqe_m; /* Mask Number for WQ elements. */
+	uint16_t rq_wqe_n; /* Number of WQ elements (in log2). */
+	struct mlx5_wqe *rq_wqes;
+	struct mlx5_wqe *rq_wqes_end;
+	uint32_t rq_mem_len;
+	/* Send CQ. */
+	uint16_t sq_cq_ci; /* Consumer index for completion queue. */
+	uint16_t sq_cq_pi; /* Production index for completion queue. */
+	uint16_t sq_cqe_s; /* Number of CQ elements. */
+	uint16_t sq_cqe_m; /* Mask for CQ indices. */
+	uint16_t sq_cqe_n; /* Number of CQ elements (in log2). */
+	volatile struct mlx5_cqe *sq_cqes;
+	volatile uint32_t *sq_cq_db;
+	uint32_t sq_cq_mem_len;
+	/* Recv CQ. */
+	uint16_t rq_cq_ci; /* Consumer index for completion queue. */
+	uint16_t rq_cq_pi; /* Production index for completion queue. */
+	uint16_t rq_cqe_s; /* Number of CQ elements. */
+	uint16_t rq_cqe_m; /* Mask for CQ indices. */
+	uint16_t rq_cqe_n; /* Number of CQ elements (in log2). */
+	volatile struct mlx5_cqe *rq_cqes;
+	volatile uint32_t *rq_cq_db;
+	uint32_t rq_cq_mem_len;
+	/* Doorbells / UAR */
+	volatile uint32_t *sq_db;
+	volatile uint32_t *rq_db;
 	struct mlx5_uar_data uar_data;
-	struct rte_mbuf *elts[];
-	/* Storage for queued packets, must be the last field. */
 };
+
+struct mlx5_qp_obj {
+	struct mlx5_devx_obj *qp_devx;
+	struct mlx5_devx_obj sq_cq_obj;
+	struct mlx5_devx_obj rq_cq_obj;
+
+	struct {
+		void *wqes;
+		uint32_t log_wq_n;
+		uint32_t stride;
+		volatile uint32_t *db_rec;
+	} sq_wq, rq_wq;
+
+	volatile uint32_t *qp_db_rec;
+};
+
+struct mlx5_qp_ctrl {
+	struct mlx5_qp_data qp;
+	struct mlx5_qp_obj *obj;
+
+	rte_spinlock_t lock;
+	uint32_t refcnt;
+	uint32_t flags;
+
+	LIST_ENTRY(mlx5_qp_ctrl) next; /* for priv->qpsctrl */
+};
+
 
 
 

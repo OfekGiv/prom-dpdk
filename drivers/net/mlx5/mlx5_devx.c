@@ -21,6 +21,7 @@
 #include "mlx5.h"
 #include "mlx5_common_os.h"
 #include "mlx5_driver_event.h"
+#include "mlx5_qp.h"
 #include "mlx5_tx.h"
 #include "mlx5_rx.h"
 #include "mlx5_utils.h"
@@ -1539,11 +1540,29 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
  */
 
 int
-mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
+mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir)
 {
 
 	struct mlx5_priv *priv = dev->data->dev_private;
 	struct mlx5_qp_data *qp_data = (*priv->qps)[idx];
+
+	/* Set direction of QP */
+	qp_data->has_sq = !!(dir & MLX5_QP_DIR_TX);
+	qp_data->has_rq = !!(dir & MLX5_QP_DIR_RX);
+
+	int ret = 0;
+
+	struct mlx5_devx_cq_attr sq_cq_attr = { 0 };
+	struct mlx5_devx_cq_attr rq_cq_attr = { 0 };
+
+	if (qp_data->has_sq) {
+		sq_cq_attr.uar_page_id = mlx5_os_get_devx_uar_page_id(priv->sh->tx_uar.obj);
+
+		ret = mlx5_devx_cq_create(priv->sh->cdev->ctx, &qp_obj
+
+
+
+	}
 
 	/* Create completion queue object with DevX. */
 	ret = mlx5_devx_cq_create(sh->cdev->ctx, &txq_obj->cq_obj, log_desc_n,
