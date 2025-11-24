@@ -28,6 +28,7 @@
 #include "mlx5_devx.h"
 #include "mlx5_flow.h"
 #include "mlx5_flow_os.h"
+#include "rte_eal.h"
 
 /**
  * Validate given external queue's port is valid or not.
@@ -1544,13 +1545,28 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir
 {
 
 	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_dev_ctx_shared *sh = priv->sh;
 	struct mlx5_qp_data *qp_data = (*priv->qps)[idx];
+	struct mlx5_qp_ctrl *qp_ctrl = container_of(qp_data, struct mlx5_qp_ctrl, qp);
+	struct mlx5_qp_obj *qp_obj = qp_ctrl->obj;
 
 	/* Set direction of QP */
 	qp_data->has_sq = !!(dir & MLX5_QP_DIR_TX);
 	qp_data->has_rq = !!(dir & MLX5_QP_DIR_RX);
 
 	int ret = 0;
+	uint32_t max_wq = mlx5_dev_get_max_wq_size(sh);
+	uint32_t sq_wqe_s = 0, rq_wqe_s = 0;
+	uint32_t sq_cqe_s = 0, rq_cqe_s = 0;
+	uint32_t sq_log_cqe_n = 0, rq_log_cqe_n = 0;
+	//uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
+
+	MLX5_ASSERT(qp_data);
+	MLX5_ASSERT(qp_obj);
+	MLX5_ASSERT(rte_eal_process_type() == RTE_PROC_PRIMARY);
+
+	qp_data->port_id = dev->data->port_id;
+	qp_data->qp_idx = idx;
 
 	struct mlx5_devx_cq_attr sq_cq_attr = { 0 };
 	struct mlx5_devx_cq_attr rq_cq_attr = { 0 };
@@ -1558,12 +1574,28 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir
 	if (qp_data->has_sq) {
 		sq_cq_attr.uar_page_id = mlx5_os_get_devx_uar_page_id(priv->sh->tx_uar.obj);
 
-		ret = mlx5_devx_cq_create(priv->sh->cdev->ctx, &qp_obj
+		ret = mlx5_devx_cq_create(priv->sh->cdev->ctx, &qp_obj->sq_cq_obj);
+
 
 
 
 	}
-
+	cqe_n = wqe_n = 32;
+	log_desc_n = log2above(cqe_n);
+	cqe_n = 1UL << log_desc_n;
+	if (cqe_n > UINT16_MAX) {
+		DRV_LOG(ERR, "Port %u QP %u requests to many CQEs %u.",
+			dev->data->port_id, qp_data->qp_idx, cqe_n);
+		rte_errno = EINVAL;
+		return 0;
+	}
+	if (priv->sh->config.txq_mem_algn) {
+		cq_attr.umem = priv->consec_tx_mem.umem;
+		cq_attr.umem_obj = priv->consec_tx_mem.umem_obj;
+		cq_attr.q_off = priv->consec_tx_mem.cq_cur_off;
+		cq_attr.db_off = db_start + (2 * idx + 1) * MLX5_DBR_SIZE;
+		cq_attr.q_len = txq_data->cq_mem_len;
+	}
 	/* Create completion queue object with DevX. */
 	ret = mlx5_devx_cq_create(sh->cdev->ctx, &txq_obj->cq_obj, log_desc_n,
 				  &cq_attr, priv->sh->numa_node);
@@ -1582,7 +1614,7 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir
 	*txq_data->cq_db = 0;
 
 	//Allocate UAR for DBR
-	mlx5_devx_qp_create(
+	mlx5_devx_qp_create(priv->sh->cdev->ctx,qp_obj,);
 
 }
 

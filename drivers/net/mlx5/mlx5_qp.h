@@ -82,10 +82,11 @@ struct __rte_cache_aligned mlx5_qp_data {
 };
 
 struct mlx5_qp_obj {
-	struct mlx5_devx_obj *qp_devx;
-	struct mlx5_devx_obj sq_cq_obj;
-	struct mlx5_devx_obj rq_cq_obj;
+	struct mlx5_devx_obj *qp_devx;  /* DevX QP object */
+	struct mlx5_devx_obj sq_cq_obj; /* Devx send CQ */
+	struct mlx5_devx_obj rq_cq_obj; /* DevX recv CQ */
 
+	/* WQ descriptors */
 	struct {
 		void *wqes;
 		uint32_t log_wq_n;
@@ -93,7 +94,7 @@ struct mlx5_qp_obj {
 		volatile uint32_t *db_rec;
 	} sq_wq, rq_wq;
 
-	volatile uint32_t *qp_db_rec;
+	volatile uint32_t *qp_db_rec; /* DB record array for SQ/RQ */
 };
 
 struct mlx5_qp_ctrl {

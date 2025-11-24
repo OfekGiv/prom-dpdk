@@ -2049,6 +2049,7 @@ struct mlx5_priv {
 	struct mlx5_list *hrxqs; /* Hash Rx queues. */
 	LIST_HEAD(txq, mlx5_txq_ctrl) txqsctrl; /* DPDK Tx queues. */
 	LIST_HEAD(txqobj, mlx5_txq_obj) txqsobj; /* Verbs/DevX Tx queues. */
+	LIST_HEAD(qp, mlx5_qp_ctrl) qpsctrl; /* List of all QPs (ctrls). */
 	/* Indirection tables. */
 	LIST_HEAD(ind_tables, mlx5_ind_table_obj) ind_tbls;
 	/* Standalone indirect tables. */
