@@ -83,7 +83,7 @@ struct __rte_cache_aligned mlx5_qp_data {
 };
 
 struct mlx5_qp_obj {
-	struct mlx5_devx_obj *qp_devx;  /* DevX QP object */
+	struct mlx5_devx_qp *qp_devx;  /* DevX QP object */
 	struct mlx5_devx_cq sq_cq_obj; /* Devx send CQ */
 	struct mlx5_devx_cq rq_cq_obj; /* DevX recv CQ */
 

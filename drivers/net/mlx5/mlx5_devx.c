@@ -1557,9 +1557,12 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir
 
 	int ret = 0;
 	uint32_t max_wq = mlx5_dev_get_max_wq_size(sh);
-	uint32_t sq_wqe_s = 0, rq_wqe_s = 0;
-	uint32_t sq_cqe_s = 0, rq_cqe_s = 0;
-	uint32_t sq_log_cqe_n = 0, rq_log_cqe_n = 0;
+	uint32_t sq_wqe_s = 0;
+	//uint32_t rq_wqe_s = 0;
+	uint32_t sq_cqe_s = 0;
+	//uint32_t rq_cqe_s = 0;
+	uint32_t sq_log_cqe_n = 0;
+	//uint32_t rq_log_cqe_n = 0;
 	//uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
 
 	MLX5_ASSERT(qp_data);
@@ -1668,13 +1671,13 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir
 	struct mlx5_devx_qp_attr attr = {0};
 
 	attr.cqn = qp_obj->sq_cq_obj.cq->id;
-	attr.log_page_size;
+	//attr.log_page_size;
 	attr.num_of_receive_wqes = 0; /* Must be power of 2. */
 	attr.log_rq_stride = 0;
 	attr.num_of_send_wqbbs = sq_wqe_s / MLX5_SEND_WQE_BB; /* Must be power of 2. */
 
 	//Allocate UAR for DBR
-	ret = mlx5_devx_qp_create(priv->sh->cdev->ctx,&qp_obj->qp_devx,sq_wqe_s, &attr, sh->numa_node);
+	ret = mlx5_devx_qp_create(priv->sh->cdev->ctx,qp_obj->qp_devx,sq_wqe_s, &attr, sh->numa_node);
 
 	if (ret) {
 		DRV_LOG(ERR, "Port %u QP %u QP create failed.", dev->data->port_id, qp_data->qp_idx);

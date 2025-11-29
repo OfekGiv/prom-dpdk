@@ -6,7 +6,10 @@
 #define RTE_PMD_MLX5_DEVX_H_
 
 #include "mlx5.h"
+#include "mlx5_qp.h"
 
+
+int mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir);
 int mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx);
 int mlx5_txq_devx_modify(struct mlx5_txq_obj *obj,
 			 enum mlx5_txq_modify_type type, uint8_t dev_port);
@@ -15,5 +18,6 @@ int mlx5_devx_modify_rq(struct mlx5_rxq_priv *rxq, uint8_t type);
 int mlx5_devx_extq_port_validate(uint16_t port_id);
 
 extern struct mlx5_obj_ops devx_obj_ops;
+
 
 #endif /* RTE_PMD_MLX5_DEVX_H_ */
