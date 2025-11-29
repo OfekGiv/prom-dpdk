@@ -16,9 +16,10 @@
 
 #include "generic/rte_spinlock.h"
 #include "mlx5.h"
-#include "mlx5_autoconf.h"
-#include "mlx5_rxtx.h"
-#include "mlx5_trace.h"
+#include "mlx5_common_devx.h"
+//#include "mlx5_autoconf.h"
+//#include "mlx5_rxtx.h"
+//#include "mlx5_trace.h"
 
 enum mlx5_qp_dir {
 	MLX5_QP_DIR_TX = 1 << 0,
@@ -83,8 +84,8 @@ struct __rte_cache_aligned mlx5_qp_data {
 
 struct mlx5_qp_obj {
 	struct mlx5_devx_obj *qp_devx;  /* DevX QP object */
-	struct mlx5_devx_obj sq_cq_obj; /* Devx send CQ */
-	struct mlx5_devx_obj rq_cq_obj; /* DevX recv CQ */
+	struct mlx5_devx_cq sq_cq_obj; /* Devx send CQ */
+	struct mlx5_devx_cq rq_cq_obj; /* DevX recv CQ */
 
 	/* WQ descriptors */
 	struct {
