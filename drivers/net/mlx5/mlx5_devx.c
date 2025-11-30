@@ -1533,6 +1533,123 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 }
 #endif
 
+/* Release QP resources
+ *
+ *
+ *
+ */
+
+void
+mlx5_qp_release_devx_resources(struct mlx5_qp_ctrl *qp_ctrl)
+{
+    struct mlx5_qp_obj  *qp_obj;
+    struct mlx5_qp_data *qp_data;
+
+    if (!qp_ctrl)
+        return;
+
+    qp_obj  = qp_ctrl->obj;
+    qp_data = &qp_ctrl->qp;
+
+    /* Nothing to do if obj is not set (partially constructed or never used). */
+    if (!qp_obj)
+        goto clear_qp_data;
+
+    /*
+     * Secondary processes must not destroy DevX objects.
+     * They share QP/CQ objects created by the primary.
+     */
+    if (rte_eal_process_type() == RTE_PROC_SECONDARY)
+        goto clear_qp_data;
+
+    /* 1. Destroy DevX QP if it exists. */
+    if (qp_obj->qp_devx) {
+        mlx5_devx_qp_destroy(qp_obj->qp_devx);
+        rte_free(qp_obj->qp_devx);
+        qp_obj->qp_devx = NULL;
+    }
+
+    /* 2. Destroy Recv CQ (if present). */
+    if (qp_data->has_rq && qp_obj->rq_cq_obj.cq) {
+        mlx5_devx_cq_destroy(&qp_obj->rq_cq_obj);
+        memset(&qp_obj->rq_cq_obj, 0, sizeof(qp_obj->rq_cq_obj));
+    }
+
+    /* 3. Destroy Send CQ (if present). */
+    if (qp_data->has_sq && qp_obj->sq_cq_obj.cq) {
+        mlx5_devx_cq_destroy(&qp_obj->sq_cq_obj);
+        memset(&qp_obj->sq_cq_obj, 0, sizeof(qp_obj->sq_cq_obj));
+    }
+
+    /* 4. Clear WQ descriptors in qp_obj (we don't free memory here). */
+    qp_obj->sq_wq.wqes   = NULL;
+    qp_obj->sq_wq.log_wq_n = 0;
+    qp_obj->sq_wq.stride = 0;
+    qp_obj->sq_wq.db_rec = NULL;
+
+    qp_obj->rq_wq.wqes   = NULL;
+    qp_obj->rq_wq.log_wq_n = 0;
+    qp_obj->rq_wq.stride = 0;
+    qp_obj->rq_wq.db_rec = NULL;
+
+    qp_obj->qp_db_rec = NULL;
+
+clear_qp_data:
+    if (!qp_data)
+        return;
+
+    /* 5. Clear qp_data so no one uses stale pointers / sizes. */
+
+    qp_data->qp_num   = 0;
+    qp_data->has_sq   = 0;
+    qp_data->has_rq   = 0;
+
+    /* SQ WQ */
+    qp_data->sq_wqe_ci   = 0;
+    qp_data->sq_wqe_pi   = 0;
+    qp_data->sq_wqe_s    = 0;
+    qp_data->sq_wqe_m    = 0;
+    qp_data->sq_wqe_n    = 0;
+    qp_data->sq_wqes     = NULL;
+    qp_data->sq_wqes_end = NULL;
+    qp_data->sq_mem_len  = 0;
+
+    /* RQ WQ */
+    qp_data->rq_wqe_ci   = 0;
+    qp_data->rq_wqe_pi   = 0;
+    qp_data->rq_wqe_s    = 0;
+    qp_data->rq_wqe_m    = 0;
+    qp_data->rq_wqe_n    = 0;
+    qp_data->rq_wqes     = NULL;
+    qp_data->rq_wqes_end = NULL;
+    qp_data->rq_mem_len  = 0;
+
+    /* SQ CQ */
+    qp_data->sq_cq_ci     = 0;
+    qp_data->sq_cq_pi     = 0;
+    qp_data->sq_cqe_s     = 0;
+    qp_data->sq_cqe_m     = 0;
+    qp_data->sq_cqe_n     = 0;
+    qp_data->sq_cqes      = NULL;
+    qp_data->sq_cq_db     = NULL;
+    qp_data->sq_cq_mem_len = 0;
+
+    /* RQ CQ */
+    qp_data->rq_cq_ci     = 0;
+    qp_data->rq_cq_pi     = 0;
+    qp_data->rq_cqe_s     = 0;
+    qp_data->rq_cqe_m     = 0;
+    qp_data->rq_cqe_n     = 0;
+    qp_data->rq_cqes      = NULL;
+    qp_data->rq_cq_db     = NULL;
+    qp_data->rq_cq_mem_len = 0;
+
+    /* Doorbells / UAR */
+    qp_data->sq_db = NULL;
+    qp_data->rq_db = NULL;
+    memset(&qp_data->uar_data, 0, sizeof(qp_data->uar_data));
+}
+
 /**
  * Create the QP DevX object
  *
@@ -1688,11 +1805,13 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir
 	return 0;
 
 error:
-	// Error section
-	// Cleanup
-	ret = rte_errno;
-	// mlx5_qp_release();
-	rte_errno = ret;
+	{
+		// Error section
+		// Cleanup
+		int saved = rte_errno;
+		mlx5_qp_release_devx_resources(qp_ctrl);
+		rte_errno = saved;
+	}
 	return -rte_errno;
 }
 

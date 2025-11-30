@@ -8,7 +8,7 @@
 #include "mlx5.h"
 #include "mlx5_qp.h"
 
-
+void mlx5_qp_release_devx_resources(struct mlx5_qp_ctrl *qp_ctrl);
 int mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir);
 int mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx);
 int mlx5_txq_devx_modify(struct mlx5_txq_obj *obj,
