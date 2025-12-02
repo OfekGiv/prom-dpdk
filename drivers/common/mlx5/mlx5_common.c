@@ -58,6 +58,16 @@ uint8_t haswell_broadwell_cpu;
  */
 #define MLX5_SQ_DB_NC "sq_db_nc"
 
+/*
+ * PROM feature enable
+ */
+#define MLX5_PROM_EN "prom_en"
+
+/*
+ * PROM group size
+ */
+#define MLX5_PROM_GRP_SIZE "prom_grp_size"
+
 /* In case this is an x86_64 intel processor to check if
  * we should use relaxed ordering.
  */
@@ -312,6 +322,10 @@ mlx5_common_args_check_handler(const char *key, const char *val, void *opaque)
 		config->pd_handle = tmp;
 	} else if (strcmp(key, MLX5_PROBE_OPT) == 0) {
 		config->probe_opt = !!tmp;
+	} else if (strcmp(key, MLX5_PROM_EN) == 0) {
+		config->prom_en = tmp;
+	} else if (strcmp(key, MLX5_PROM_GRP_SIZE) == 0) {
+		config->prom_grp_size = tmp;
 	}
 	return 0;
 }
@@ -342,6 +356,8 @@ mlx5_common_config_get(struct mlx5_kvargs_ctrl *mkvlist,
 		MLX5_DEVICE_FD,
 		MLX5_PD_HANDLE,
 		MLX5_PROBE_OPT,
+		MLX5_PROM_EN,
+		MLX5_PROM_GRP_SIZE,
 		NULL,
 	};
 	int ret = 0;
@@ -354,6 +370,9 @@ mlx5_common_config_get(struct mlx5_kvargs_ctrl *mkvlist,
 	config->dbnc = MLX5_ARG_UNSET;
 	config->device_fd = MLX5_ARG_UNSET;
 	config->pd_handle = MLX5_ARG_UNSET;
+	config->prom_en = 0;
+	config->prom_grp_size = 0;
+
 	if (mkvlist == NULL)
 		return 0;
 	/* Process common parameters. */
@@ -373,6 +392,8 @@ mlx5_common_config_get(struct mlx5_kvargs_ctrl *mkvlist,
 	DRV_LOG(DEBUG, "probe_opt_en is %u.", config->probe_opt);
 	DRV_LOG(DEBUG, "Send Queue doorbell mapping parameter is %d.",
 		config->dbnc);
+	DRV_LOG(DEBUG, "prom_en is %u.", config->prom_en);
+	DRV_LOG(DEBUG, "prom_grp_size is %u.", config->prom_grp_size);
 	return ret;
 }
 
@@ -912,6 +933,18 @@ mlx5_common_probe_again_args_validate(struct mlx5_common_device *cdev,
 	}
 	if (cdev->config.dbnc != config->dbnc) {
 		DRV_LOG(ERR, "\"" MLX5_SQ_DB_NC "\" "
+			"configuration mismatch for device %s.",
+			cdev->dev->name);
+		goto error;
+	}
+	if (cdev->config.prom_en != config->prom_en) {
+		DRV_LOG(ERR, "\"" MLX5_PROM_EN "\" "
+			"configuration mismatch for device %s.",
+			cdev->dev->name);
+		goto error;
+	}
+	if (cdev->config.prom_grp_size != config->prom_grp_size) {
+		DRV_LOG(ERR, "\"" MLX5_PROM_GRP_SIZE "\" "
 			"configuration mismatch for device %s.",
 			cdev->dev->name);
 		goto error;

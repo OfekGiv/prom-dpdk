@@ -533,6 +533,8 @@ struct mlx5_common_dev_config {
 	/* Allow/prevent implicit mempool memory registration. */
 	unsigned int mr_ext_memseg_en:1;
 	/* Whether memseg should be extended for MR creation. */
+	unsigned int prom_en:1; /* PROM feature enable */
+	unsigned int prom_grp_size; /* PROM groups size */
 };
 
 struct mlx5_common_device {
