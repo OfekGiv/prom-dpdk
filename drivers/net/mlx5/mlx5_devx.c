@@ -1533,6 +1533,22 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 }
 #endif
 
+/**
+ * Destroy the QP DevX object.
+ *
+ * @param qp_obj
+ *   QP object to destroy.
+ */
+static void
+mlx5_qp_release_devx_resources(struct mlx5_qp_obj *qp_obj)
+{
+	mlx5_devx_qp_destroy(&qp_obj->qp_obj);
+	memset(&qp_obj->qp_obj, 0, sizeof(qp_obj->qp_obj));
+	mlx5_devx_cq_destroy(&qp_obj->rq_cq_obj);
+	memset(&qp_obj->rq_cq_obj, 0, sizeof(qp_obj->rq_cq_obj));
+	mlx5_devx_cq_destroy(&qp_obj->sq_cq_obj);
+	memset(&qp_obj->sq_cq_obj, 0, sizeof(qp_obj->sq_cq_obj));
+}
 /* Release QP resources
  *
  *
@@ -1659,7 +1675,7 @@ clear_qp_data:
  */
 
 int
-mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir)
+mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 {
 
 	struct mlx5_priv *priv = dev->data->dev_private;
@@ -1669,8 +1685,8 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir
 	struct mlx5_qp_obj *qp_obj = qp_ctrl->obj;
 
 	/* Set direction of QP */
-	qp_data->has_sq = !!(dir & MLX5_QP_DIR_TX);
-	qp_data->has_rq = !!(dir & MLX5_QP_DIR_RX);
+	qp_data->has_sq = !!(qp_ctrl->direction & MLX5_QP_DIR_TX);
+	qp_data->has_rq = !!(qp_ctrl->direction & MLX5_QP_DIR_RX);
 
 	int ret = 0;
 	uint32_t max_wq = mlx5_dev_get_max_wq_size(sh);
@@ -1686,8 +1702,8 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx, enum mlx5_qp_dir dir
 	MLX5_ASSERT(qp_obj);
 	MLX5_ASSERT(rte_eal_process_type() == RTE_PROC_PRIMARY);
 
-	qp_data->has_sq = !!(dir & MLX5_QP_DIR_TX);
-	qp_data->has_rq = !!(dir & MLX5_QP_DIR_RX);
+	qp_data->has_sq = !!(qp_ctrl->direction & MLX5_QP_DIR_TX);
+	qp_data->has_rq = !!(qp_ctrl->direction & MLX5_QP_DIR_RX);
 	qp_data->port_id = dev->data->port_id;
 	qp_data->qp_idx = idx;
 
@@ -2015,6 +2031,21 @@ mlx5_txq_devx_obj_release(struct mlx5_txq_obj *txq_obj)
 	}
 }
 
+/**
+ * Release an QP DevX object.
+ *
+ * @param qp_obj
+ *   DevX QP queue object.
+ */
+void
+mlx5_qp_devx_obj_release(struct mlx5_qp_obj *qp_obj)
+{
+	MLX5_ASSERT(qp_obj);
+	/* Notify external users that Tx queue will be destroyed. */
+	//mlx5_driver_event_notify_txq_destroy(txq_obj->txq_ctrl);
+	mlx5_qp_release_devx_resources(qp_obj);
+}
+
 struct mlx5_obj_ops devx_obj_ops = {
 	.rxq_obj_modify_vlan_strip = mlx5_rxq_obj_modify_rq_vlan_strip,
 	.rxq_obj_modify_counter_set_id = mlx5_rxq_obj_modify_counter,
@@ -2034,6 +2065,8 @@ struct mlx5_obj_ops devx_obj_ops = {
 	.txq_obj_new = mlx5_txq_devx_obj_new,
 	.txq_obj_modify = mlx5_txq_devx_modify,
 	.txq_obj_release = mlx5_txq_devx_obj_release,
+	.qp_obj_new = mlx5_qp_devx_obj_new,
+	.qp_obj_release = mlx5_qp_devx_obj_release,
 	.lb_dummy_queue_create = NULL,
 	.lb_dummy_queue_release = NULL,
 };

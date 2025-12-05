@@ -19,6 +19,7 @@
 #include "mlx5_tx.h"
 #include "mlx5_utils.h"
 #include "rte_pmd_mlx5.h"
+#include "mlx5_qp.h"
 
 static void mlx5_traffic_disable_legacy(struct rte_eth_dev *dev);
 
@@ -36,6 +37,85 @@ mlx5_txq_stop(struct rte_eth_dev *dev)
 
 	for (i = 0; i != priv->txqs_n; ++i)
 		mlx5_txq_release(dev, i);
+}
+
+
+/**
+ * Start traffic on QP.
+ *
+ * @param dev
+ *   Pointer to Ethernet device structure.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+static int
+mlx5_qp_start(struct rte_eth_dev *dev)
+{
+
+	struct mlx5_priv *priv = dev->data->dev_private;
+	uint32_t flags = MLX5_MEM_RTE | MLX5_MEM_ZERO;
+	unsigned int i;
+	int ret = 0;
+
+	/* Iterate over all QPs we want to start. */
+	for (i = 0; i != priv->qps_n; ++i) {
+		struct mlx5_qp_ctrl *qp_ctrl = mlx5_qp_get(dev, i);
+		struct mlx5_qp_data *qp_data;
+		struct mlx5_qp_obj *qp_obj;
+
+		if (!qp_ctrl)
+			continue; /* Not configured or not used. */
+
+		MLX5_ASSERT(!qp_ctrl->obj);
+
+		qp_alloc_elts(qp_ctrl);
+		qp_ctrl->obj = mlx5_malloc_numa_tolerant(flags,
+					    sizeof(struct mlx5_qp_obj),
+					    0, qp_ctrl->socket);
+		if (!qp_ctrl->obj) {
+			DRV_LOG(ERR, "Port %u QP %u cannot allocate "
+		                     "memory resources.", dev->data->port_id,
+				                          qp_data->qp_idx);
+			rte_errno = ENOMEM;
+			goto error;
+		}
+		ret = priv->obj_ops.qp_obj_new(dev, i);
+		if (ret < 0) {
+			mlx5_free(qp_ctrl->obj);
+			qp_ctrl->obj = NULL;
+			goto error;
+		}
+		DRV_LOG(DEBUG, "Port %u qp %u updated with %p.",
+					  dev->data->port_id, i, (void *)&qp_ctrl->obj);
+		LIST_INSERT_HEAD(&priv->qpsobj, qp_ctrl->obj, next);
+	}
+
+	return 0;
+
+error:
+	ret = rte_errno; /* Save rte_errno before cleanup. */
+	do {
+		mlx5_qp_release(dev, i);
+	} while (i-- != 0);
+	rte_errno = ret; /* Restore rte_errno. */
+	return -rte_errno;
+}
+
+/**
+ * Stop traffic on QP.
+ *
+ * @param dev
+ *   Pointer to Ethernet device structure.
+ */
+static void
+mlx5_qp_stop(struct rte_eth_dev *dev)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	unsigned int i;
+
+	for (i = 0; i != priv->qps_n; ++i)
+		mlx5_qp_release(dev, i);
 }
 
 /**

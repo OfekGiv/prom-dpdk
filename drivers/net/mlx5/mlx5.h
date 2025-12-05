@@ -1794,6 +1794,25 @@ struct mlx5_txq_obj {
 	};
 };
 
+struct mlx5_qp_obj {
+	LIST_ENTRY(mlx5_qp_obj) next; /* Pointer to the next element. */
+	struct mlx5_qp_ctrl *qp_ctrl; /* Pointer to the control queue. */
+
+	struct mlx5_devx_qp qp_obj;  /* DevX QP object */
+	struct mlx5_devx_cq sq_cq_obj; /* Devx send CQ */
+	struct mlx5_devx_cq rq_cq_obj; /* DevX recv CQ */
+
+	/* WQ descriptors */
+	struct {
+		void *wqes;
+		uint32_t log_wq_n;
+		uint32_t stride;
+		volatile uint32_t *db_rec;
+	} sq_wq, rq_wq;
+
+	volatile uint32_t *qp_db_rec; /* DB record array for SQ/RQ */
+};
+
 enum mlx5_rxq_modify_type {
 	MLX5_RXQ_MOD_ERR2RST, /* modify state from error to reset. */
 	MLX5_RXQ_MOD_RST2RDY, /* modify state from reset to ready. */
@@ -1841,6 +1860,8 @@ struct mlx5_obj_ops {
 	int (*txq_obj_modify)(struct mlx5_txq_obj *obj,
 			      enum mlx5_txq_modify_type type, uint8_t dev_port);
 	void (*txq_obj_release)(struct mlx5_txq_obj *txq_obj);
+	int (*qp_obj_new)(struct rte_eth_dev *dev, uint16_t idx);
+	void (*qp_obj_release)(struct mlx5_qp_obj *qp_obj);
 	int (*lb_dummy_queue_create)(struct rte_eth_dev *dev);
 	void (*lb_dummy_queue_release)(struct rte_eth_dev *dev);
 };
@@ -2050,6 +2071,7 @@ struct mlx5_priv {
 	LIST_HEAD(txq, mlx5_txq_ctrl) txqsctrl; /* DPDK Tx queues. */
 	LIST_HEAD(txqobj, mlx5_txq_obj) txqsobj; /* Verbs/DevX Tx queues. */
 	LIST_HEAD(qp, mlx5_qp_ctrl) qpsctrl; /* List of all QPs (ctrls). */
+	LIST_HEAD(qpobj, mlx5_qp_obj) qpsobj; /* Verbs/DevX Tx queues. */
 	/* Indirection tables. */
 	LIST_HEAD(ind_tables, mlx5_ind_table_obj) ind_tbls;
 	/* Standalone indirect tables. */

@@ -16,7 +16,7 @@
 
 #include "generic/rte_spinlock.h"
 #include "mlx5.h"
-#include "mlx5_common_devx.h"
+//#include "mlx5_common_devx.h"
 //#include "mlx5_autoconf.h"
 //#include "mlx5_rxtx.h"
 //#include "mlx5_trace.h"
@@ -40,6 +40,12 @@ struct __rte_cache_aligned mlx5_qp_data {
 	uint8_t has_sq;
 	uint8_t has_rq;
 
+	uint16_t sq_elts_head; /* Current counter in (*elts)[]. */
+	uint16_t sq_elts_tail; /* Counter of first element awaiting completion. */
+	uint16_t sq_elts_comp; /* elts index since last completion request. */
+	uint16_t sq_elts_s; /* Number of mbuf elements. */
+	uint16_t sq_elts_m; /* Mask for mbuf elements indices. */
+	uint16_t sq_elts_n:4; /* elts[] length (in log2). */
 	/* SQ / send WQ. */
 	uint16_t sq_wqe_ci; /* Consumer index for work queue. */
 	uint16_t sq_wqe_pi; /* Producer index for work queue. */
@@ -80,37 +86,29 @@ struct __rte_cache_aligned mlx5_qp_data {
 	volatile uint32_t *sq_db;
 	volatile uint32_t *rq_db;
 	struct mlx5_uar_data uar_data;
+	struct rte_mbuf *sq_elts[];
 };
 
-struct mlx5_qp_obj {
-	struct mlx5_devx_qp *qp_devx;  /* DevX QP object */
-	struct mlx5_devx_cq sq_cq_obj; /* Devx send CQ */
-	struct mlx5_devx_cq rq_cq_obj; /* DevX recv CQ */
-
-	/* WQ descriptors */
-	struct {
-		void *wqes;
-		uint32_t log_wq_n;
-		uint32_t stride;
-		volatile uint32_t *db_rec;
-	} sq_wq, rq_wq;
-
-	volatile uint32_t *qp_db_rec; /* DB record array for SQ/RQ */
-};
 
 struct mlx5_qp_ctrl {
 	struct mlx5_qp_data qp;
 	struct mlx5_qp_obj *obj;
 
+	uint8_t direction;
+
 	rte_spinlock_t lock;
-	uint32_t refcnt;
 	uint32_t flags;
 
 	LIST_ENTRY(mlx5_qp_ctrl) next; /* for priv->qpsctrl */
+	RTE_ATOMIC(uint32_t) refcnt; /* Reference counter. */
+	struct mlx5_priv *priv; /* Back pointer to private data. */
+	unsigned int socket; /* CPU socket ID for allocations. */
 };
 
 
 
-
+static inline struct mlx5_qp_ctrl * mlx5_qp_get(struct rte_eth_dev *dev, uint16_t idx);
+void qp_alloc_elts(struct mlx5_qp_ctrl *qp_ctrl);
+int mlx5_qp_release(struct rte_eth_dev *dev, uint16_t idx);
 
 #endif /* RTE_PMD_MLX5_QP_H_ */
