@@ -1498,6 +1498,7 @@ struct eth_dev_ops {
 	eth_rx_disable_intr_t      rx_queue_intr_disable;
 
 	eth_tx_queue_setup_t       tx_queue_setup;/**< Set up device Tx queue */
+	eth_tx_queue_setup_t       qp_queue_setup;/**< Set up device QP Tx queue */
 	eth_queue_release_t        tx_queue_release; /**< Release Tx queue */
 	eth_tx_done_cleanup_t      tx_done_cleanup;/**< Free Tx ring mbufs */
 

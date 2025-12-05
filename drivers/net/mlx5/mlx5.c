@@ -2564,6 +2564,7 @@ const struct eth_dev_ops mlx5_dev_ops = {
 	.rx_queue_avail_thresh_query = mlx5_rx_queue_lwm_query,
 	.rx_hairpin_queue_setup = mlx5_rx_hairpin_queue_setup,
 	.tx_queue_setup = mlx5_tx_queue_setup,
+	.qp_queue_setup = mlx5_qp_setup,
 	.tx_hairpin_queue_setup = mlx5_tx_hairpin_queue_setup,
 	.rx_queue_release = mlx5_rx_queue_release,
 	.tx_queue_release = mlx5_tx_queue_release,
