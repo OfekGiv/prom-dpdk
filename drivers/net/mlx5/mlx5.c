@@ -39,6 +39,7 @@
 #include "mlx5_rxtx.h"
 #include "mlx5_rx.h"
 #include "mlx5_tx.h"
+#include "mlx5_qp.h"
 #include "mlx5_autoconf.h"
 #include "mlx5_flow.h"
 #include "mlx5_flow_os.h"

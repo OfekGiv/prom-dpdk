@@ -9,7 +9,7 @@
 #include "rte_stdatomic.h"
 #include "mlx5_qp.h"
 
-static inline struct mlx5_qp_ctrl *
+struct mlx5_qp_ctrl *
 mlx5_qp_get(struct rte_eth_dev *dev, uint16_t idx)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;

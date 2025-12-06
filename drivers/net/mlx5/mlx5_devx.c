@@ -1275,6 +1275,38 @@ error:
 }
 
 /**
+ * Select QP  TX TIS number.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param queue_idx
+ *   Queue index in DPDK Tx queue array.
+ *
+ * @return
+ *   > 0 on success, a negative errno value otherwise.
+ */
+static uint32_t
+mlx5_get_qp_tis_num(struct rte_eth_dev *dev, uint16_t queue_idx)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_qp_data *qp_data = (*priv->qps)[queue_idx];
+	int tis_idx = 0;
+
+	if (priv->sh->bond.n_port) {
+		if (qp_data->tx_aggr_affinity) {
+			tis_idx = qp_data->tx_aggr_affinity;
+		} else if (priv->sh->lag.affinity_mode == MLX5_LAG_MODE_TIS) {
+			tis_idx = (priv->lag_affinity_idx + queue_idx) %
+				priv->sh->bond.n_port + 1;
+			DRV_LOG(INFO, "port %d qp %d gets affinity %d and maps to PF %d.",
+				dev->data->port_id, queue_idx, tis_idx,
+				priv->sh->lag.tx_remap_affinity[tis_idx - 1]);
+		}
+	}
+	MLX5_ASSERT(priv->sh->tis[tis_idx]);
+	return priv->sh->tis[tis_idx]->id;
+}
+/**
  * Select TXQ TIS number.
  *
  * @param dev
@@ -1551,6 +1583,49 @@ mlx5_qp_release_devx_resources(struct mlx5_qp_obj *qp_obj)
 }
 
 /**
+ * Create a QP SQ object and its resources using DevX.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param idx
+ *   Queue index in DPDK Tx queue array.
+ * @param[in] log_desc_n
+ *   Log of number of descriptors in queue.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+/*
+static int
+mlx5_qp_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
+				  uint16_t log_desc_n)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_common_device *cdev = priv->sh->cdev;
+	struct mlx5_uar *uar = &priv->sh->tx_uar;
+	struct mlx5_qp_data *qp_data = (*priv->qps)[idx];
+	struct mlx5_qp_ctrl *qp_ctrl =
+			container_of(qp_data, struct mlx5_qp_ctrl, qp);
+	struct mlx5_qp_obj *qp_obj = qp_ctrl->obj;
+	struct mlx5_devx_qp_attr qp_attr = {
+		.pd = cdev->pdn,
+		.uar_index = mlx5_os_get_devx_uar_page_id(uar->obj),
+		.user_index = idx,
+		.num_of_receive_wqes = 0,
+
+	};
+	uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
+	int ret;
+
+
+	ret = mlx5_devx_qp_create(cdev->ctx, &qp_obj->qp_obj,
+				  log_desc_n, &sq_attr, priv->sh->numa_node);
+	if (!ret && priv->sh->config.txq_mem_algn)
+		priv->consec_tx_mem.sq_cur_off += qp_data->sq_mem_len;
+	return ret;
+}
+*/
+/**
  * Create the QP DevX object
  *
  *
@@ -1563,33 +1638,117 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 {
 
 	struct mlx5_priv *priv = dev->data->dev_private;
-	struct mlx5_dev_ctx_shared *sh = priv->sh;
 	struct mlx5_qp_data *qp_data = (*priv->qps)[idx];
 	struct mlx5_qp_ctrl *qp_ctrl = container_of(qp_data, struct mlx5_qp_ctrl, qp);
+	struct mlx5_proc_priv *ppriv = MLX5_PROC_PRIV(PORT_ID(priv));
+	struct mlx5_dev_ctx_shared *sh = priv->sh;
 	struct mlx5_qp_obj *qp_obj = qp_ctrl->obj;
+	struct mlx5_devx_cq_attr cq_attr = {
+		.uar_page_id = mlx5_os_get_devx_uar_page_id(sh->tx_uar.obj),
+	};
 
-	/* Set direction of QP */
-	qp_data->has_sq = !!(qp_ctrl->direction & MLX5_QP_DIR_TX);
-	qp_data->has_rq = !!(qp_ctrl->direction & MLX5_QP_DIR_RX);
-
+	struct mlx5_devx_qp_attr qp_attr = {0};
+	uint32_t cqe_n, log_desc_n;
+	uint32_t wqe_n, wqe_size;
 	int ret = 0;
-	uint32_t max_wq = mlx5_dev_get_max_wq_size(sh);
-	uint32_t sq_wqe_s = 0;
-	//uint32_t rq_wqe_s = 0;
-	uint32_t sq_cqe_s = 0;
-	//uint32_t rq_cqe_s = 0;
-	uint32_t sq_log_cqe_n = 0;
-	//uint32_t rq_log_cqe_n = 0;
-	//uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
+	uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
 
 	MLX5_ASSERT(qp_data);
 	MLX5_ASSERT(qp_obj);
 	MLX5_ASSERT(rte_eal_process_type() == RTE_PROC_PRIMARY);
+	MLX5_ASSERT(ppriv);
+	qp_obj->qp_ctrl = qp_ctrl;
+	qp_obj->dev = dev;
 
-	qp_data->has_sq = !!(qp_ctrl->direction & MLX5_QP_DIR_TX);
-	qp_data->has_rq = !!(qp_ctrl->direction & MLX5_QP_DIR_RX);
-	qp_data->port_id = dev->data->port_id;
-	qp_data->qp_idx = idx;
+
+	if (__rte_trace_point_fp_is_enabled() &&
+	    qp_data->sq_offloads & RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP)
+		cqe_n = UINT16_MAX / 2 - 1;
+	else
+		cqe_n = (1UL << qp_data->sq_elts_n) / MLX5_TX_COMP_THRESH +
+			1 + MLX5_TX_COMP_THRESH_INLINE_DIV;
+	log_desc_n = log2above(cqe_n);
+	cqe_n = 1UL << log_desc_n;
+	if (cqe_n > UINT16_MAX) {
+		DRV_LOG(ERR, "Port %u QP Tx queue %u requests to many CQEs %u.",
+			dev->data->port_id, qp_data->qp_idx, cqe_n);
+		rte_errno = EINVAL;
+		return 0;
+	}
+	if (priv->sh->config.txq_mem_algn) {
+		cq_attr.umem = priv->consec_tx_mem.umem;
+		cq_attr.umem_obj = priv->consec_tx_mem.umem_obj;
+		cq_attr.q_off = priv->consec_tx_mem.cq_cur_off;
+		cq_attr.db_off = db_start + (2 * idx + 1) * MLX5_DBR_SIZE;
+		cq_attr.q_len = qp_data->sq_cq_mem_len;
+	}
+	/* Create completion queue object with DevX. */
+	ret = mlx5_devx_cq_create(sh->cdev->ctx, &qp_obj->sq_cq_obj, log_desc_n,
+				  &cq_attr, priv->sh->numa_node);
+	if (ret) {
+		DRV_LOG(ERR, "Port %u QP Tx queue %u CQ creation failure.",
+			dev->data->port_id, idx);
+		goto error;
+	}
+
+	qp_data->sq_cqe_n = log_desc_n;
+	qp_data->sq_cqe_s = cqe_n;
+	qp_data->sq_cqe_m = qp_data->cqe_s - 1;
+	qp_data->sq_cqes = qp_obj->sq_cq_obj.cqes;
+	qp_data->sq_cq_ci = 0;
+	qp_data->sq_cq_pi = 0;
+	qp_data->sq_cq_db = qp_obj->sq_cq_obj.db_rec;
+	*qp_data->sq_cq_db = 0;
+
+	/*
+	 * Adjust the amount of WQEs depending on inline settings.
+	 * The number of descriptors should be enough to handle
+	 * the specified number of packets. If queue is being created
+	 * with Verbs the rdma-core does queue size adjustment
+	 * internally in the mlx5_calc_sq_size(), we do the same
+	 * for the queue being created with DevX at this point.
+	 */
+	wqe_size = qp_data->tso_en ?
+		   RTE_ALIGN(qp_ctrl->max_tso_header, MLX5_WSEG_SIZE) : 0;
+	wqe_size += sizeof(struct mlx5_wqe_cseg) +
+		    sizeof(struct mlx5_wqe_eseg) +
+		    sizeof(struct mlx5_wqe_dseg);
+	if (qp_data->inlen_send)
+		wqe_size = RTE_MAX(wqe_size, sizeof(struct mlx5_wqe_cseg) +
+					     sizeof(struct mlx5_wqe_eseg) +
+					     RTE_ALIGN(qp_data->inlen_send +
+						       sizeof(uint32_t),
+						       MLX5_WSEG_SIZE));
+	wqe_size = RTE_ALIGN(wqe_size, MLX5_WQE_SIZE) / MLX5_WQE_SIZE;
+	/* Create Send Queue object with DevX. */
+	wqe_n = RTE_MIN((1UL << qp_data->sq_elts_n) * wqe_size,
+			(uint32_t)mlx5_dev_get_max_wq_size(priv->sh));
+	log_desc_n = log2above(wqe_n);
+
+	// Create devx SQ resources for master QP only
+	qp_attr.pd = sh->cdev->pdn;
+	qp_attr.uar_index = mlx5_os_get_devx_uar_page_id(priv->sh->tx_uar.obj);
+	qp_attr.user_index = idx;
+	qp_attr.num_of_receive_wqes = 0;
+	qp_attr.cqn = qp_obj->sq_cq_obj.cq->id;
+	ret = mlx5_devx_qp_create(priv->sh->cdev->ctx, qp_obj->qp_obj,
+			   		sq_wqe_s, &qp_attr, sh->numa_node);
+	if (ret) {
+		DRV_LOG(ERR, "Port %u Tx queue %u SQ creation failure.",
+			dev->data->port_id, idx);
+		rte_errno = errno;
+		goto error;
+	}
+
+
+
+
+
+
+
+
+
+
 
 	/* -------------------------------
          * 1) Configure WQ sizes (SQ/RQ)

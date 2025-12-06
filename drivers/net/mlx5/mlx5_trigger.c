@@ -61,8 +61,7 @@ mlx5_qp_start(struct rte_eth_dev *dev)
 	/* Iterate over all QPs we want to start. */
 	for (i = 0; i != priv->qps_n; ++i) {
 		struct mlx5_qp_ctrl *qp_ctrl = mlx5_qp_get(dev, i);
-		struct mlx5_qp_data *qp_data;
-		struct mlx5_qp_obj *qp_obj;
+		struct mlx5_qp_data *qp_data = &qp_ctrl->qp;
 
 		if (!qp_ctrl)
 			continue; /* Not configured or not used. */

@@ -136,7 +136,7 @@ struct mlx5_qp_ctrl {
 
 
 
-static inline struct mlx5_qp_ctrl * mlx5_qp_get(struct rte_eth_dev *dev, uint16_t idx);
+struct mlx5_qp_ctrl * mlx5_qp_get(struct rte_eth_dev *dev, uint16_t idx);
 void qp_alloc_elts(struct mlx5_qp_ctrl *qp_ctrl);
 int mlx5_qp_releasable(struct rte_eth_dev *dev, uint16_t idx);
 int mlx5_qp_release(struct rte_eth_dev *dev, uint16_t idx);
