@@ -2566,6 +2566,7 @@ const struct eth_dev_ops mlx5_dev_ops = {
 	.rx_hairpin_queue_setup = mlx5_rx_hairpin_queue_setup,
 	.tx_queue_setup = mlx5_tx_queue_setup,
 	.qp_queue_setup = mlx5_qp_setup,
+	.qp_release = mlx5_qp_queue_release,
 	.tx_hairpin_queue_setup = mlx5_tx_hairpin_queue_setup,
 	.rx_queue_release = mlx5_rx_queue_release,
 	.tx_queue_release = mlx5_tx_queue_release,

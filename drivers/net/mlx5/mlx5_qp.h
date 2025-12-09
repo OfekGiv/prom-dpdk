@@ -142,5 +142,6 @@ int mlx5_qp_releasable(struct rte_eth_dev *dev, uint16_t idx);
 int mlx5_qp_release(struct rte_eth_dev *dev, uint16_t idx);
 struct mlx5_qp_ctrl * mlx5_qp_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc, unsigned int socket, const struct rte_eth_txconf *conf);
 int mlx5_qp_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc, unsigned int socket, const struct rte_eth_txconf *conf);
+void mlx5_qp_queue_release(struct rte_eth_dev *dev, uint16_t qid);
 
 #endif /* RTE_PMD_MLX5_QP_H_ */

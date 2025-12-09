@@ -623,6 +623,26 @@ mlx5_qp_cq_mem_length(struct rte_eth_dev *dev, struct mlx5_qp_ctrl *qp_ctrl)
 }
 
 /**
+ * DPDK callback to release a TX queue.
+ *
+ * @param dev
+ *   Pointer to Ethernet device structure.
+ * @param qid
+ *   Transmit queue index.
+ */
+void
+mlx5_qp_queue_release(struct rte_eth_dev *dev, uint16_t qid)
+{
+	struct mlx5_qp_data *qp = dev->data->qps[qid];
+
+	if (qp == NULL)
+		return;
+	DRV_LOG(DEBUG, "port %u removing QP %u from list",
+		dev->data->port_id, qid);
+	mlx5_qp_release(dev, qid);
+}
+
+/**
  * Create a DPDK QP.
  *
  * @param dev

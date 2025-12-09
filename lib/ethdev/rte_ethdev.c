@@ -2687,11 +2687,11 @@ rte_eth_tx_queue_setup(uint16_t port_id, uint16_t tx_queue_id,
 		return -EBUSY;
 
 	if (dev->data->dev_started &&
-		(dev->data->tx_queue_state[tx_queue_id] !=
+		(dev->data->qp_state[tx_queue_id] !=
 			RTE_ETH_QUEUE_STATE_STOPPED))
 		return -EBUSY;
 
-	eth_dev_txq_release(dev, tx_queue_id);
+	eth_dev_qp_txq_release(dev, tx_queue_id);
 
 	if (tx_conf == NULL)
 		tx_conf = &dev_info.default_txconf;

@@ -127,7 +127,7 @@ mlx5_dev_configure(struct rte_eth_dev *dev)
 	}
 	*/
 	priv->qps = (void *)dev->data->qps;
-	if (txqs_n != priv->qps_n) {
+	if (qps_n != priv->qps_n) {
 		DRV_LOG(INFO, "port %u Tx queues number update: %u -> %u",
 			dev->data->port_id, priv->txqs_n, txqs_n);
 		priv->qps_n = qps_n;

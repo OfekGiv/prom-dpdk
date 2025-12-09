@@ -406,6 +406,19 @@ eth_dev_rxq_release(struct rte_eth_dev *dev, uint16_t qid)
 }
 
 void
+eth_dev_qp_txq_release(struct rte_eth_dev *dev, uint16_t qid)
+{
+	void **qp = dev->data->qps;
+
+	if (qp[qid] == NULL)
+		return;
+
+	if (dev->dev_ops->qp_release != NULL)
+		dev->dev_ops->qp_release(dev, qid);
+	qp[qid] = NULL;
+}
+
+void
 eth_dev_txq_release(struct rte_eth_dev *dev, uint16_t qid)
 {
 	void **txq = dev->data->tx_queues;
