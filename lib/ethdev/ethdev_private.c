@@ -479,6 +479,36 @@ eth_dev_tx_queue_config(struct rte_eth_dev *dev, uint16_t nb_queues)
 }
 
 int
+eth_dev_qp_tx_queue_config(struct rte_eth_dev *dev, uint16_t nb_queues)
+{
+	uint16_t old_nb_queues = dev->data->nb_qps;
+	unsigned int i;
+
+	if (dev->data->qps == NULL && nb_queues != 0) { /* first time configuration */
+		dev->data->qps = rte_zmalloc("ethdev->qps",
+				sizeof(dev->data->qps[0]) *
+				RTE_MAX_QUEUES_PER_PORT,
+				RTE_CACHE_LINE_SIZE);
+		if (dev->data->qps == NULL) {
+			dev->data->nb_qps = 0;
+			return -(ENOMEM);
+		}
+	} else if (dev->data->qps != NULL && nb_queues != 0) { /* re-configure */
+		for (i = nb_queues; i < old_nb_queues; i++)
+			eth_dev_txq_release(dev, i);
+
+	} else if (dev->data->qps != NULL && nb_queues == 0) {
+		for (i = nb_queues; i < old_nb_queues; i++)
+			eth_dev_txq_release(dev, i);
+
+		rte_free(dev->data->qps);
+		dev->data->qps = NULL;
+	}
+	dev->data->nb_qps = nb_queues;
+	return 0;
+}
+
+int
 eth_stats_qstats_get(uint16_t port_id, struct rte_eth_stats *stats, struct eth_queue_stats *qstats)
 {
 	struct rte_eth_dev *dev;

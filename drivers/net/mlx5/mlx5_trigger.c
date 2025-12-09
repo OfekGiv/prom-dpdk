@@ -1409,12 +1409,20 @@ continue_dev_start:
 			dev->data->port_id, strerror(rte_errno));
 		goto error;
 	}
+	ret = mlx5_qp_start(dev);
+	if (ret) {
+		DRV_LOG(ERR, "port %u QP allocation failed: %s",
+			dev->data->port_id, strerror(rte_errno));
+		goto error;
+	}
+/*
 	ret = mlx5_txq_start(dev);
 	if (ret) {
 		DRV_LOG(ERR, "port %u Tx queue allocation failed: %s",
 			dev->data->port_id, strerror(rte_errno));
 		goto error;
 	}
+*/
 	if (priv->config.std_delay_drop || priv->config.hp_delay_drop) {
 		if (!priv->sh->dev_cap.vf && !priv->sh->dev_cap.sf &&
 		    !priv->representor) {

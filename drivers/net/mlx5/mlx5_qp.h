@@ -117,7 +117,7 @@ struct __rte_cache_aligned mlx5_qp_data {
 	struct rte_mbuf *sq_elts[];
 };
 
-
+__extension__
 struct mlx5_qp_ctrl {
 
 	uint8_t direction;
@@ -140,8 +140,6 @@ struct mlx5_qp_ctrl * mlx5_qp_get(struct rte_eth_dev *dev, uint16_t idx);
 void qp_alloc_elts(struct mlx5_qp_ctrl *qp_ctrl);
 int mlx5_qp_releasable(struct rte_eth_dev *dev, uint16_t idx);
 int mlx5_qp_release(struct rte_eth_dev *dev, uint16_t idx);
-static void qp_set_params(struct mlx5_qp_ctrl *qp_ctrl);
-static int mlx5_qp_pre_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t *desc);
 struct mlx5_qp_ctrl * mlx5_qp_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc, unsigned int socket, const struct rte_eth_txconf *conf);
 int mlx5_qp_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc, unsigned int socket, const struct rte_eth_txconf *conf);
 

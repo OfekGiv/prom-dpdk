@@ -28,6 +28,7 @@ sources = files(
         'mlx5_flow_meter.c',
         'mlx5_mac.c',
         'mlx5_nta_rss.c',
+        'mlx5_qp.c',
         'mlx5_rss.c',
         'mlx5_rx.c',
         'mlx5_rxmode.c',

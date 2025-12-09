@@ -70,6 +70,7 @@ mlx5_dev_configure(struct rte_eth_dev *dev)
 	struct mlx5_priv *priv = dev->data->dev_private;
 	unsigned int rxqs_n = dev->data->nb_rx_queues;
 	unsigned int txqs_n = dev->data->nb_tx_queues;
+	unsigned int qps_n = dev->data->nb_qps;
 	const uint8_t use_app_rss_key =
 		!!dev->data->dev_conf.rx_adv_conf.rss_conf.rss_key;
 	int ret = 0;
@@ -117,11 +118,19 @@ mlx5_dev_configure(struct rte_eth_dev *dev)
 		rte_errno = ENOMEM;
 		return -rte_errno;
 	}
+	/*
 	priv->txqs = (void *)dev->data->tx_queues;
 	if (txqs_n != priv->txqs_n) {
 		DRV_LOG(INFO, "port %u Tx queues number update: %u -> %u",
 			dev->data->port_id, priv->txqs_n, txqs_n);
 		priv->txqs_n = txqs_n;
+	}
+	*/
+	priv->qps = (void *)dev->data->qps;
+	if (txqs_n != priv->qps_n) {
+		DRV_LOG(INFO, "port %u Tx queues number update: %u -> %u",
+			dev->data->port_id, priv->txqs_n, txqs_n);
+		priv->qps_n = qps_n;
 	}
 	if (priv->ext_txqs && txqs_n >= MLX5_EXTERNAL_TX_QUEUE_ID_MIN) {
 		DRV_LOG(ERR, "port %u cannot handle this many Tx queues (%u), "

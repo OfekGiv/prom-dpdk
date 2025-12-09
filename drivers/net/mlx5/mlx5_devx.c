@@ -1285,6 +1285,7 @@ error:
  * @return
  *   > 0 on success, a negative errno value otherwise.
  */
+/*
 static uint32_t
 mlx5_get_qp_tis_num(struct rte_eth_dev *dev, uint16_t queue_idx)
 {
@@ -1306,6 +1307,7 @@ mlx5_get_qp_tis_num(struct rte_eth_dev *dev, uint16_t queue_idx)
 	MLX5_ASSERT(priv->sh->tis[tis_idx]);
 	return priv->sh->tis[tis_idx]->id;
 }
+*/
 /**
  * Select TXQ TIS number.
  *
@@ -1731,133 +1733,12 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	qp_attr.user_index = idx;
 	qp_attr.num_of_receive_wqes = 0;
 	qp_attr.cqn = qp_obj->sq_cq_obj.cq->id;
-	ret = mlx5_devx_qp_create(priv->sh->cdev->ctx, qp_obj->qp_obj,
-			   		sq_wqe_s, &qp_attr, sh->numa_node);
+	ret = mlx5_devx_qp_create(priv->sh->cdev->ctx, &qp_obj->qp_obj,
+			   		wqe_n, &qp_attr, sh->numa_node);
 	if (ret) {
 		DRV_LOG(ERR, "Port %u Tx queue %u SQ creation failure.",
 			dev->data->port_id, idx);
 		rte_errno = errno;
-		goto error;
-	}
-
-
-
-
-
-
-
-
-
-
-
-	/* -------------------------------
-         * 1) Configure WQ sizes (SQ/RQ)
-         * ------------------------------
-	 */
-
-	if (qp_data->has_sq) {
-
-		sq_wqe_s = max_wq;
-/*
-		sq_wqe_s = sizeof(struct mlx5_wqe_cseg) +
-			   sizeof(struct mlx5_wqe_eseg) +
-			   sizeof(struct mlx5_wqe_dseg);
-*/
-		qp_data->sq_wqe_s = sq_wqe_s;
-
-	} else {
-		qp_data->sq_wqe_s = 0;
-		qp_data->sq_wqes = qp_data->sq_wqes_end = NULL;
-	}
-
-	/***** TODO complete RQ *****/
-/*
-	if (qp_data->has_rq) {
-		if (rq_log_wq_n == 0)
-			return -EINVAL;
-
-		rq_wqe_s = 1U << rq_log_wq_n;
-		if (rq_wqe_s > max_wq)
-			rq_wqe_s = max_wq;
-
-		qp_data->rq_wqe_n = log2above(rq_wqe_s);
-		qp_data->rq_wqe_s = 1U << qp_data->rq_wqe_n;
-		qp_data->rq_wqe_m = qp_data->rq_wqe_s - 1;
-	} else {
-		qp_data->rq_wqe_n = qp_data->rq_wqe_s = qp_data->rq_wqe_m = 0;
-		qp_data->rq_wqes = qp_data->rq_wqes_end = NULL;
-	}
-*/
-	/* For a first version, choose CQ depth == WQ depth. */
-	if (qp_data->has_sq) {
-		sq_cqe_s      = qp_data->sq_wqe_s;
-//		sq_log_cqe_n  = log2above(sq_cqe_s);
-//		sq_cqe_s      = 1U << sq_log_cqe_n;
-	}
-/*
-	if (qp_data->has_rq) {
-		rq_cqe_s      = qp_data->rq_wqe_s;
-		rq_log_cqe_n  = log2above(rq_cqe_s);
-		rq_cqe_s      = 1U << rq_log_cqe_n;
-	}
-*/
-
-	struct mlx5_devx_cq_attr sq_cq_attr = { 0 };
-	//struct mlx5_devx_cq_attr rq_cq_attr = { 0 };
-
-
-	if (qp_data->has_sq) {
-		uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
-		sq_cq_attr.uar_page_id = mlx5_os_get_devx_uar_page_id(priv->sh->tx_uar.obj);
-		sq_log_cqe_n = log2above(sq_cqe_s);
-		if (sh->config.txq_mem_algn) {
-			sq_cq_attr.umem     = priv->consec_tx_mem.umem;
-			sq_cq_attr.umem_obj = priv->consec_tx_mem.umem_obj;
-			sq_cq_attr.q_off    = priv->consec_tx_mem.cq_cur_off;
-			sq_cq_attr.q_len    = sq_cqe_s * sizeof(struct mlx5_cqe);
-			sq_cq_attr.db_off   = db_start + (2 * qp_data->qp_idx + 0) * MLX5_DBR_SIZE;
-		}
-
-
-		ret = mlx5_devx_cq_create(sh->cdev->ctx, &(qp_obj->sq_cq_obj), sq_log_cqe_n, &sq_cq_attr, sh->numa_node);
-
-		if (ret) {
-			DRV_LOG(ERR, "Port %u QP %u SQ CQ creation failure.", dev->data->port_id, qp_data->qp_idx);
-			rte_errno = EINVAL;
-			goto error;
-		}
-
-		qp_data->sq_cqe_n  = sq_log_cqe_n;
-		qp_data->sq_cqe_s  = sq_cqe_s;
-		qp_data->sq_cqes   = qp_obj->sq_cq_obj.cqes;
-		qp_data->sq_cq_ci  = 0;
-		qp_data->sq_cq_pi  = 0;
-		qp_data->sq_cq_db  = qp_obj->sq_cq_obj.db_rec;
-		*qp_data->sq_cq_db = 0;
-
-		if (sh->config.txq_mem_algn)
-			priv->consec_tx_mem.cq_cur_off +=
-				sq_cqe_s * sizeof(struct mlx5_cqe);
-	} else {
-		qp_data->sq_cqe_n = qp_data->sq_cqe_s =	qp_data->sq_cqe_m = 0;
-		qp_data->sq_cqes  = NULL;
-		qp_data->sq_cq_db = NULL;
-	}
-
-	struct mlx5_devx_qp_attr attr = {0};
-
-	attr.cqn = qp_obj->sq_cq_obj.cq->id;
-	//attr.log_page_size;
-	attr.num_of_receive_wqes = 0; /* Must be power of 2. */
-	attr.log_rq_stride = 0;
-	attr.num_of_send_wqbbs = sq_wqe_s / MLX5_SEND_WQE_BB; /* Must be power of 2. */
-
-	//Allocate UAR for DBR
-	ret = mlx5_devx_qp_create(priv->sh->cdev->ctx,qp_obj->qp_devx,sq_wqe_s, &attr, sh->numa_node);
-
-	if (ret) {
-		DRV_LOG(ERR, "Port %u QP %u QP create failed.", dev->data->port_id, qp_data->qp_idx);
-		rte_errno = EINVAL;
 		goto error;
 	}
 

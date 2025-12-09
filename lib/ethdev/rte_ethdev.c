@@ -1592,8 +1592,18 @@ rte_eth_dev_configure(uint16_t port_id, uint16_t nb_rx_q, uint16_t nb_tx_q,
 		ret = diag;
 		goto rollback;
 	}
-
+/*
 	diag = eth_dev_tx_queue_config(dev, nb_tx_q);
+	if (diag != 0) {
+		RTE_ETHDEV_LOG_LINE(ERR,
+			"Port%u eth_dev_tx_queue_config = %d",
+			port_id, diag);
+		eth_dev_rx_queue_config(dev, 0);
+		ret = diag;
+		goto rollback;
+	}
+*/
+	diag = eth_dev_qp_tx_queue_config(dev, nb_tx_q);
 	if (diag != 0) {
 		RTE_ETHDEV_LOG_LINE(ERR,
 			"Port%u eth_dev_tx_queue_config = %d",
@@ -2618,13 +2628,18 @@ rte_eth_tx_queue_setup(uint16_t port_id, uint16_t tx_queue_id,
 
 	RTE_ETH_VALID_PORTID_OR_ERR_RET(port_id, -ENODEV);
 	dev = &rte_eth_devices[port_id];
-
+/*
 	if (tx_queue_id >= dev->data->nb_tx_queues) {
 		RTE_ETHDEV_LOG_LINE(ERR, "Invalid Tx queue_id=%u", tx_queue_id);
 		return -EINVAL;
 	}
+	*/
+	if (tx_queue_id >= dev->data->nb_qps) {
+		RTE_ETHDEV_LOG_LINE(ERR, "Invalid Tx queue_id=%u", tx_queue_id);
+		return -EINVAL;
+	}
 
-	if (dev->dev_ops->tx_queue_setup == NULL)
+	if (dev->dev_ops->qp_queue_setup == NULL)
 		return -ENOTSUP;
 
 	if (tx_conf != NULL &&
@@ -2713,8 +2728,11 @@ rte_eth_tx_queue_setup(uint16_t port_id, uint16_t tx_queue_id,
 	}
 
 	rte_ethdev_trace_txq_setup(port_id, tx_queue_id, nb_tx_desc, tx_conf);
-	return eth_err(port_id, dev->dev_ops->tx_queue_setup(dev,
+	return eth_err(port_id, dev->dev_ops->qp_queue_setup(dev,
 		       tx_queue_id, nb_tx_desc, socket_id, &local_conf));
+
+	//return eth_err(port_id, dev->dev_ops->tx_queue_setup(dev,
+	//	       tx_queue_id, nb_tx_desc, socket_id, &local_conf));
 }
 
 RTE_EXPORT_EXPERIMENTAL_SYMBOL(rte_eth_tx_hairpin_queue_setup, 19.11)
