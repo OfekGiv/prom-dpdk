@@ -70,6 +70,15 @@ uint16_t mlx5_tx_burst_##func(void *txq, \
 			      struct rte_mbuf **pkts, \
 			      uint16_t pkts_n)
 
+#define MLX5_QP_TXOFF_DECL(func, olx) \
+uint16_t mlx5_qp_tx_burst_##func(void *qp_txq, \
+			      struct rte_mbuf **pkts, \
+			      uint16_t pkts_n) \
+{ \
+	return mlx5_qp_tx_burst_tmpl((struct mlx5_qp_data *)qp_txq, \
+		    pkts, pkts_n, (olx)); \
+}
+
 #define MLX5_TXOFF_DECL(func, olx) \
 uint16_t mlx5_tx_burst_##func(void *txq, \
 			      struct rte_mbuf **pkts, \
@@ -3836,6 +3845,314 @@ burst_exit:
 					   loc.pkts_sent, pkts_n);
 	return loc.pkts_sent;
 }
+
+
+/**
+ * DPDK Tx callback template. This is configured template used to generate
+ * routines optimized for specified offload setup.
+ * One of this generated functions is chosen at SQ configuration time.
+ *
+ * @param txq
+ *   Generic pointer to TX queue structure.
+ * @param[in] pkts
+ *   Packets to transmit.
+ * @param pkts_n
+ *   Number of packets in array.
+ * @param olx
+ *   Configured offloads mask, presents the bits of MLX5_TXOFF_CONFIG_xxx
+ *   values. Should be static to take compile time static configuration
+ *   advantages.
+ *
+ * @return
+ *   Number of packets successfully transmitted (<= pkts_n).
+ */
+static __rte_always_inline uint16_t
+mlx5_qp_tx_burst_tmpl(struct mlx5_txq_data *__rte_restrict txq,
+		   struct rte_mbuf **__rte_restrict pkts,
+		   uint16_t pkts_n,
+		   unsigned int olx)
+{
+	struct mlx5_txq_local loc;
+	enum mlx5_txcmp_code ret;
+	unsigned int part;
+
+	MLX5_ASSERT(txq->elts_s >= (uint16_t)(txq->elts_head - txq->elts_tail));
+	MLX5_ASSERT(txq->wqe_s >= (uint16_t)(txq->wqe_ci - txq->wqe_pi));
+	if (unlikely(!pkts_n))
+		return 0;
+	if (MLX5_TXOFF_CONFIG(INLINE))
+		loc.mbuf_free = 0;
+	loc.pkts_sent = 0;
+	loc.pkts_copy = 0;
+	loc.wqe_last = NULL;
+
+send_loop:
+	loc.pkts_loop = loc.pkts_sent;
+	/*
+	 * Check if there are some CQEs, if any:
+	 * - process an encountered errors
+	 * - process the completed WQEs
+	 * - free related mbufs
+	 * - doorbell the NIC about processed CQEs
+	 */
+	rte_prefetch0(*(pkts + loc.pkts_sent));
+	mlx5_tx_handle_completion(txq, olx);
+	/*
+	 * Calculate the number of available resources - elts and WQEs.
+	 * There are two possible different scenarios:
+	 * - no data inlining into WQEs, one WQEBB may contains up to
+	 *   four packets, in this case elts become scarce resource
+	 * - data inlining into WQEs, one packet may require multiple
+	 *   WQEBBs, the WQEs become the limiting factor.
+	 */
+	MLX5_ASSERT(txq->elts_s >= (uint16_t)(txq->elts_head - txq->elts_tail));
+	loc.elts_free = txq->elts_s -
+				(uint16_t)(txq->elts_head - txq->elts_tail);
+	MLX5_ASSERT(txq->wqe_s >= (uint16_t)(txq->wqe_ci - txq->wqe_pi));
+	loc.wqe_free = txq->wqe_s -
+				(uint16_t)(txq->wqe_ci - txq->wqe_pi);
+	if (unlikely(!loc.elts_free || !loc.wqe_free))
+		goto burst_exit;
+	for (;;) {
+		/*
+		 * Fetch the packet from array. Usually this is the first
+		 * packet in series of multi/single segment packets.
+		 */
+		loc.mbuf = *(pkts + loc.pkts_sent);
+		/* Dedicated branch for multi-segment packets. */
+		if (MLX5_TXOFF_CONFIG(MULTI) &&
+		    unlikely(NB_SEGS(loc.mbuf) > 1)) {
+			/*
+			 * Multi-segment packet encountered.
+			 * Hardware is able to process it only
+			 * with SEND/TSO opcodes, one packet
+			 * per WQE, do it in dedicated routine.
+			 */
+enter_send_multi:
+			MLX5_ASSERT(loc.pkts_sent >= loc.pkts_copy);
+			part = loc.pkts_sent - loc.pkts_copy;
+			if (!MLX5_TXOFF_CONFIG(INLINE) && part) {
+				/*
+				 * There are some single-segment mbufs not
+				 * stored in elts. The mbufs must be in the
+				 * same order as WQEs, so we must copy the
+				 * mbufs to elts here, before the coming
+				 * multi-segment packet mbufs is appended.
+				 */
+				mlx5_tx_copy_elts(txq, pkts + loc.pkts_copy,
+						  part, olx);
+				loc.pkts_copy = loc.pkts_sent;
+			}
+			MLX5_ASSERT(pkts_n > loc.pkts_sent);
+			ret = mlx5_tx_burst_mseg(txq, pkts, pkts_n, &loc, olx);
+			if (!MLX5_TXOFF_CONFIG(INLINE))
+				loc.pkts_copy = loc.pkts_sent;
+			/*
+			 * These returned code checks are supposed
+			 * to be optimized out due to routine inlining.
+			 */
+			if (ret == MLX5_TXCMP_CODE_EXIT) {
+				/*
+				 * The routine returns this code when
+				 * all packets are sent or there is no
+				 * enough resources to complete request.
+				 */
+				break;
+			}
+			if (ret == MLX5_TXCMP_CODE_ERROR) {
+				/*
+				 * The routine returns this code when some error
+				 * in the incoming packets format occurred.
+				 */
+				txq->stats.oerrors++;
+				break;
+			}
+			if (ret == MLX5_TXCMP_CODE_SINGLE) {
+				/*
+				 * The single-segment packet was encountered
+				 * in the array, try to send it with the
+				 * best optimized way, possible engaging eMPW.
+				 */
+				goto enter_send_single;
+			}
+			if (MLX5_TXOFF_CONFIG(TSO) &&
+			    ret == MLX5_TXCMP_CODE_TSO) {
+				/*
+				 * The single-segment TSO packet was
+				 * encountered in the array.
+				 */
+				goto enter_send_tso;
+			}
+			/* We must not get here. Something is going wrong. */
+			MLX5_ASSERT(false);
+			txq->stats.oerrors++;
+			break;
+		}
+		/* Dedicated branch for single-segment TSO packets. */
+		if (MLX5_TXOFF_CONFIG(TSO) &&
+		    unlikely(loc.mbuf->ol_flags & RTE_MBUF_F_TX_TCP_SEG)) {
+			/*
+			 * TSO might require special way for inlining
+			 * (dedicated parameters) and is sent with
+			 * MLX5_OPCODE_TSO opcode only, provide this
+			 * in dedicated branch.
+			 */
+enter_send_tso:
+			MLX5_ASSERT(NB_SEGS(loc.mbuf) == 1);
+			MLX5_ASSERT(pkts_n > loc.pkts_sent);
+			ret = mlx5_tx_burst_tso(txq, pkts, pkts_n, &loc, olx);
+			/*
+			 * These returned code checks are supposed
+			 * to be optimized out due to routine inlining.
+			 */
+			if (ret == MLX5_TXCMP_CODE_EXIT)
+				break;
+			if (ret == MLX5_TXCMP_CODE_ERROR) {
+				txq->stats.oerrors++;
+				break;
+			}
+			if (ret == MLX5_TXCMP_CODE_SINGLE)
+				goto enter_send_single;
+			if (MLX5_TXOFF_CONFIG(MULTI) &&
+			    ret == MLX5_TXCMP_CODE_MULTI) {
+				/*
+				 * The multi-segment packet was
+				 * encountered in the array.
+				 */
+				goto enter_send_multi;
+			}
+			/* We must not get here. Something is going wrong. */
+			MLX5_ASSERT(false);
+			txq->stats.oerrors++;
+			break;
+		}
+		/*
+		 * The dedicated branch for the single-segment packets
+		 * without TSO. Often these ones can be sent using
+		 * MLX5_OPCODE_EMPW with multiple packets in one WQE.
+		 * The routine builds the WQEs till it encounters
+		 * the TSO or multi-segment packet (in case if these
+		 * offloads are requested at SQ configuration time).
+		 */
+enter_send_single:
+		MLX5_ASSERT(pkts_n > loc.pkts_sent);
+		ret = mlx5_tx_burst_single(txq, pkts, pkts_n, &loc, olx);
+		/*
+		 * These returned code checks are supposed
+		 * to be optimized out due to routine inlining.
+		 */
+		if (ret == MLX5_TXCMP_CODE_EXIT)
+			break;
+		if (ret == MLX5_TXCMP_CODE_ERROR) {
+			txq->stats.oerrors++;
+			break;
+		}
+		if (MLX5_TXOFF_CONFIG(MULTI) &&
+		    ret == MLX5_TXCMP_CODE_MULTI) {
+			/*
+			 * The multi-segment packet was
+			 * encountered in the array.
+			 */
+			goto enter_send_multi;
+		}
+		if (MLX5_TXOFF_CONFIG(TSO) &&
+		    ret == MLX5_TXCMP_CODE_TSO) {
+			/*
+			 * The single-segment TSO packet was
+			 * encountered in the array.
+			 */
+			goto enter_send_tso;
+		}
+		/* We must not get here. Something is going wrong. */
+		MLX5_ASSERT(false);
+		txq->stats.oerrors++;
+		break;
+	}
+	/*
+	 * Main Tx loop is completed, do the rest:
+	 * - set completion request if thresholds are reached
+	 * - doorbell the hardware
+	 * - copy the rest of mbufs to elts (if any)
+	 */
+	MLX5_ASSERT(MLX5_TXOFF_CONFIG(INLINE) ||
+		    loc.pkts_sent >= loc.pkts_copy);
+	/* Take a shortcut if nothing is sent. */
+	if (unlikely(loc.pkts_sent == loc.pkts_loop))
+		goto burst_exit;
+	/* Request CQE generation if limits are reached. */
+	if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
+		mlx5_tx_request_completion_trace(txq, &loc, olx);
+	else
+		mlx5_tx_request_completion(txq, &loc, olx);
+	/*
+	 * Ring QP doorbell immediately after WQE building completion
+	 * to improve latencies. The pure software related data treatment
+	 * can be completed after doorbell. Tx CQEs for this SQ are
+	 * processed in this thread only by the polling.
+	 *
+	 * The rdma core library can map doorbell register in two ways,
+	 * depending on the environment variable "MLX5_SHUT_UP_BF":
+	 *
+	 * - as regular cached memory, the variable is either missing or
+	 *   set to zero. This type of mapping may cause the significant
+	 *   doorbell register writing latency and requires explicit memory
+	 *   write barrier to mitigate this issue and prevent write combining.
+	 *
+	 * - as non-cached memory, the variable is present and set to not "0"
+	 *   value. This type of mapping may cause performance impact under
+	 *   heavy loading conditions but the explicit write memory barrier is
+	 *   not required and it may improve core performance.
+	 *
+	 * - the legacy behaviour (prior 19.08 release) was to use some
+	 *   heuristics to decide whether write memory barrier should
+	 *   be performed. This behavior is supported with specifying
+	 *   tx_db_nc=2, write barrier is skipped if application provides
+	 *   the full recommended burst of packets, it supposes the next
+	 *   packets are coming and the write barrier will be issued on
+	 *   the next burst (after descriptor writing, at least).
+	 */
+	mlx5_doorbell_ring(mlx5_tx_bfreg(txq),
+			   *(volatile uint64_t *)loc.wqe_last, txq->wqe_ci,
+			   txq->qp_db, !txq->db_nc &&
+			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
+	/* Not all of the mbufs may be stored into elts yet. */
+	part = MLX5_TXOFF_CONFIG(INLINE) ? 0 : loc.pkts_sent - loc.pkts_copy;
+	if (!MLX5_TXOFF_CONFIG(INLINE) && part) {
+		/*
+		 * There are some single-segment mbufs not stored in elts.
+		 * It can be only if the last packet was single-segment.
+		 * The copying is gathered into one place due to it is
+		 * a good opportunity to optimize that with SIMD.
+		 * Unfortunately if inlining is enabled the gaps in pointer
+		 * array may happen due to early freeing of the inlined mbufs.
+		 */
+		mlx5_tx_copy_elts(txq, pkts + loc.pkts_copy, part, olx);
+		loc.pkts_copy = loc.pkts_sent;
+	}
+	MLX5_ASSERT(txq->elts_s >= (uint16_t)(txq->elts_head - txq->elts_tail));
+	MLX5_ASSERT(txq->wqe_s >= (uint16_t)(txq->wqe_ci - txq->wqe_pi));
+	if (pkts_n > loc.pkts_sent) {
+		/*
+		 * If burst size is large there might be no enough CQE
+		 * fetched from completion queue and no enough resources
+		 * freed to send all the packets.
+		 */
+		goto send_loop;
+	}
+burst_exit:
+#ifdef MLX5_PMD_SOFT_COUNTERS
+	/* Increment sent packets counter. */
+	txq->stats.opackets += loc.pkts_sent;
+#endif
+	if (MLX5_TXOFF_CONFIG(INLINE) && loc.mbuf_free)
+		__mlx5_tx_free_mbuf(txq, pkts, loc.mbuf_free, olx);
+	/* Trace productive bursts only. */
+	if (__rte_trace_point_fp_is_enabled() && loc.pkts_sent)
+		rte_pmd_mlx5_trace_tx_exit(mlx5_read_pcibar_clock_from_txq(txq),
+					   loc.pkts_sent, pkts_n);
+	return loc.pkts_sent;
+}
+
 
 /**
  * Check whether given TxQ is external.

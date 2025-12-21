@@ -282,7 +282,8 @@ eth_dev_fp_ops_setup(struct rte_eth_fp_ops *fpo,
 	fpo->rxq.data = dev->data->rx_queues;
 	fpo->rxq.clbk = (void * __rte_atomic *)(uintptr_t)dev->post_rx_burst_cbs;
 
-	fpo->txq.data = dev->data->tx_queues;
+	//fpo->txq.data = dev->data->tx_queues;
+	fpo->txq.data = dev->data->qps;
 	fpo->txq.clbk = (void * __rte_atomic *)(uintptr_t)dev->pre_tx_burst_cbs;
 }
 

@@ -8,6 +8,9 @@
 #include "rte_common.h"
 #include "rte_stdatomic.h"
 #include "mlx5_qp.h"
+#include "mlx5_rxtx.h"
+#include "mlx5_trace.h"
+
 
 struct mlx5_qp_ctrl *
 mlx5_qp_get(struct rte_eth_dev *dev, uint16_t idx)
@@ -737,3 +740,278 @@ error:
 	mlx5_free(tmpl);
 	return NULL;
 }
+
+
+/* Return 1 if the error CQE is signed otherwise, sign it and return 0. */
+static int
+check_err_cqe_seen(volatile struct mlx5_error_cqe *err_cqe)
+{
+	static const uint8_t magic[] = "seen";
+	int ret = 1;
+	unsigned int i;
+
+	for (i = 0; i < sizeof(magic); ++i)
+		if (!ret || err_cqe->rsvd1[i] != magic[i]) {
+			ret = 0;
+			err_cqe->rsvd1[i] = magic[i];
+		}
+	return ret;
+}
+
+
+/**
+ * Move QP from error state to running state and initialize indexes.
+ *
+ * @param txq_ctrl
+ *   Pointer to TX queue control structure.
+ *
+ * @return
+ *   0 on success, else -1.
+ */
+static int
+qp_tx_recover_qp(struct mlx5_qp_ctrl *qp_txq_ctrl)
+{
+	struct mlx5_mp_arg_queue_state_modify sm = {
+			.is_wq = 0,
+			.queue_id = qp_txq_ctrl->qp.qp_idx,
+	};
+
+	if (mlx5_queue_state_modify(ETH_DEV(qp_txq_ctrl->priv), &sm))
+		return -1;
+	qp_txq_ctrl->qp.sq_wqe_ci = 0;
+	qp_txq_ctrl->qp.sq_wqe_pi = 0;
+	qp_txq_ctrl->qp.sq_elts_comp = 0;
+	return 0;
+}
+
+/**
+ * Free TX queue elements.
+ *
+ * @param txq_ctrl
+ *   Pointer to TX queue structure.
+ */
+void
+qp_txq_free_elts(struct mlx5_qp_ctrl *qp_txq_ctrl)
+{
+	const uint16_t elts_n = 1 << qp_txq_ctrl->qp.sq_elts_n;
+	const uint16_t elts_m = elts_n - 1;
+	uint16_t elts_head = qp_txq_ctrl->qp.sq_elts_head;
+	uint16_t elts_tail = qp_txq_ctrl->qp.sq_elts_tail;
+	struct rte_mbuf *(*elts)[] = &qp_txq_ctrl->qp.sq_elts;
+
+	DRV_LOG(DEBUG, "port %u Tx queue %u freeing WRs",
+		PORT_ID(qp_txq_ctrl->priv), qp_txq_ctrl->qp.qp_idx);
+	qp_txq_ctrl->qp.sq_elts_head = 0;
+	qp_txq_ctrl->qp.sq_elts_tail = 0;
+	qp_txq_ctrl->qp.sq_elts_comp = 0;
+
+	while (elts_tail != elts_head) {
+		struct rte_mbuf *elt = (*elts)[elts_tail & elts_m];
+
+		MLX5_ASSERT(elt != NULL);
+		rte_pktmbuf_free_seg(elt);
+#ifdef RTE_LIBRTE_MLX5_DEBUG
+		/* Poisoning. */
+		memset(&(*elts)[elts_tail & elts_m],
+		       0x77,
+		       sizeof((*elts)[elts_tail & elts_m]));
+#endif
+		++elts_tail;
+	}
+}
+
+/**
+ * Handle error CQE.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param error_cqe
+ *   Pointer to the error CQE.
+ *
+ * @return
+ *   Negative value if queue recovery failed, otherwise
+ *   the error completion entry is handled successfully.
+ */
+static int
+mlx5_qp_tx_error_cqe_handle(struct mlx5_qp_data *__rte_restrict qp_txq,
+			 volatile struct mlx5_error_cqe *err_cqe)
+{
+	if (err_cqe->syndrome != MLX5_CQE_SYNDROME_WR_FLUSH_ERR) {
+		const uint16_t wqe_m = ((1 << qp_txq->sq_wqe_n) - 1);
+		struct mlx5_qp_ctrl *qp_txq_ctrl =
+				container_of(qp_txq, struct mlx5_qp_ctrl, qp);
+		uint16_t new_wqe_pi = rte_be_to_cpu_16(err_cqe->wqe_counter);
+		int seen = check_err_cqe_seen(err_cqe);
+
+		if (!seen && qp_txq_ctrl->dump_file_n <
+		    qp_txq_ctrl->priv->config.max_dump_files_num) {
+			MKSTR(err_str, "Unexpected CQE error syndrome "
+			      "0x%02x CQN = %u SQN = %u wqe_counter = %u "
+			      "wq_ci = %u cq_ci = %u", err_cqe->syndrome,
+			      qp_txq->sq_cqe_s,qp_txq->qp_num_8s >> 8,
+			      rte_be_to_cpu_16(err_cqe->wqe_counter),
+			      qp_txq->sq_wqe_ci, qp_txq->sq_cq_ci);
+			MKSTR(name, "dpdk_mlx5_port_%u_txq_%u_index_%u_%u",
+			      PORT_ID(qp_txq_ctrl->priv), qp_txq->qp_idx,
+			      qp_txq_ctrl->dump_file_n, (uint32_t)rte_rdtsc());
+			mlx5_dump_debug_information(name, NULL, err_str, 0);
+			mlx5_dump_debug_information(name, "MLX5 Error CQ:",
+						    (const void *)((uintptr_t)
+						    qp_txq->sq_cqes),
+						    sizeof(struct mlx5_error_cqe) *
+						    (size_t)RTE_BIT32(qp_txq->sq_cqe_n));
+			mlx5_dump_debug_information(name, "MLX5 Error SQ:",
+						    (const void *)((uintptr_t)
+						    qp_txq->sq_wqes),
+						    MLX5_WQE_SIZE *
+						    (size_t)RTE_BIT32(qp_txq->wqe_n));
+			qp_txq_ctrl->dump_file_n++;
+		}
+		if (!seen)
+			/*
+			 * Count errors in WQEs units.
+			 * Later it can be improved to count error packets,
+			 * for example, by SQ parsing to find how much packets
+			 * should be counted for each WQE.
+			 */
+			qp_txq->stats.oerrors += ((qp_txq->sq_wqe_ci & wqe_m) -
+						new_wqe_pi) & wqe_m;
+		if (qp_tx_recover_qp(qp_txq_ctrl)) {
+			/* Recovering failed - retry later on the same WQE. */
+			return -1;
+		}
+		/* Release all the remaining buffers. */
+		qp_txq_free_elts(qp_txq_ctrl);
+	}
+	return 0;
+}
+
+
+/**
+ * Update completion queue consuming index via doorbell
+ * and flush the completed data buffers.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param last_cqe
+ *   valid CQE pointer, if not NULL update txq->wqe_pi and flush the buffers.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ */
+static __rte_always_inline void
+mlx5_qp_tx_comp_flush(struct mlx5_qp_data *__rte_restrict qp_txq,
+		   volatile struct mlx5_cqe *last_cqe,
+		   unsigned int olx __rte_unused)
+{
+	if (likely(last_cqe != NULL)) {
+		uint16_t tail;
+
+		qp_txq->sq_wqe_pi = rte_be_to_cpu_16(last_cqe->wqe_counter);
+		tail = qp_txq->fcqs[(qp_txq->sq_cq_ci - 1) & qp_txq->sq_cqe_m];
+		if (likely(tail != qp_txq->sq_elts_tail)) {
+			mlx5_qp_tx_free_elts(qp_txq, tail, olx);
+			MLX5_ASSERT(tail == qp_txq->sq_elts_tail);
+		}
+	}
+}
+
+/**
+ * Manage TX completions. This routine checks the CQ for
+ * arrived CQEs, deduces the last accomplished WQE in SQ,
+ * updates SQ producing index and frees all completed mbufs.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ *
+ * NOTE: not inlined intentionally, it makes tx_burst
+ * routine smaller, simple and faster - from experiments.
+ */
+void
+mlx5_qp_tx_handle_completion(struct mlx5_qp_data *__rte_restrict qp_txq,
+			  unsigned int olx __rte_unused)
+{
+	unsigned int count = MLX5_TX_COMP_MAX_CQE;
+	volatile struct mlx5_cqe *last_cqe = NULL;
+	bool ring_doorbell = false;
+	int ret;
+
+	do {
+		volatile struct mlx5_cqe *cqe;
+
+		cqe = &qp_txq->sq_cqes[qp_txq->sq_cq_ci & qp_txq->sq_cqe_m];
+		ret = check_cqe(cqe, qp_txq->sq_cqe_s, qp_txq->sq_cq_ci);
+		if (unlikely(ret != MLX5_CQE_STATUS_SW_OWN)) {
+			if (likely(ret != MLX5_CQE_STATUS_ERR)) {
+				/* No new CQEs in completion queue. */
+				MLX5_ASSERT(ret == MLX5_CQE_STATUS_HW_OWN);
+				break;
+			}
+			/*
+			 * Some error occurred, try to restart.
+			 * We have no barrier after WQE related Doorbell
+			 * written, make sure all writes are completed
+			 * here, before we might perform SQ reset.
+			 */
+			rte_wmb();
+			ret = mlx5_qp_tx_error_cqe_handle
+				(qp_txq, (volatile struct mlx5_error_cqe *)cqe);
+			if (unlikely(ret < 0)) {
+				/*
+				 * Some error occurred on queue error
+				 * handling, we do not advance the index
+				 * here, allowing to retry on next call.
+				 */
+				return;
+			}
+			/*
+			 * We are going to fetch all entries with
+			 * MLX5_CQE_SYNDROME_WR_FLUSH_ERR status.
+			 * The send queue is supposed to be empty.
+			 */
+			ring_doorbell = true;
+			++qp_txq->sq_cq_ci;
+			qp_txq->sq_cq_pi = qp_txq->sq_cq_ci;
+			last_cqe = NULL;
+			continue;
+		}
+		/* Normal transmit completion. */
+		MLX5_ASSERT(qp_txq->sq_cq_ci != qp_txq->sq_cq_pi);
+#ifdef RTE_LIBRTE_MLX5_DEBUG
+		MLX5_ASSERT((qp_txq->fcqs[qp_txq->sq_cq_ci & qp_txq->sq_cqe_m] >> 16) ==
+			    cqe->wqe_counter);
+#endif
+		if (__rte_trace_point_fp_is_enabled()) {
+			uint64_t ts = rte_be_to_cpu_64(cqe->timestamp);
+			uint16_t wqe_id = rte_be_to_cpu_16(cqe->wqe_counter);
+
+			if (qp_txq->rt_timestamp)
+				ts = mlx5_txpp_convert_rx_ts(NULL, ts);
+			rte_pmd_mlx5_trace_tx_complete(qp_txq->port_id, qp_txq->qp_idx,
+						       wqe_id, ts);
+		}
+		ring_doorbell = true;
+		++qp_txq->sq_cq_ci;
+		last_cqe = cqe;
+		/*
+		 * We have to restrict the amount of processed CQEs
+		 * in one tx_burst routine call. The CQ may be large
+		 * and many CQEs may be updated by the NIC in one
+		 * transaction. Buffers freeing is time consuming,
+		 * multiple iterations may introduce significant latency.
+		 */
+		if (likely(--count == 0))
+			break;
+	} while (true);
+	if (likely(ring_doorbell)) {
+		/* Ring doorbell to notify hardware. */
+		rte_compiler_barrier();
+		*qp_txq->sq_cq_db = rte_cpu_to_be_32(qp_txq->sq_cq_ci);
+		mlx5_qp_tx_comp_flush(qp_txq, last_cqe, olx);
+	}
+}
+
+
