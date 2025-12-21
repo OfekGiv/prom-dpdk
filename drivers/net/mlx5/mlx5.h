@@ -1798,8 +1798,8 @@ struct mlx5_qp_obj {
 	LIST_ENTRY(mlx5_qp_obj) next; /* Pointer to the next element. */
 	struct mlx5_qp_ctrl *qp_ctrl; /* Pointer to the control queue. */
 
-	struct mlx5_devx_qp qp_obj;  /* DevX QP object */
 	struct rte_eth_dev *dev;
+	struct mlx5_devx_qp qp_obj;  /* DevX QP object */
 	struct mlx5_devx_cq sq_cq_obj; /* Devx send CQ */
 	struct mlx5_devx_cq rq_cq_obj; /* DevX recv CQ */
 

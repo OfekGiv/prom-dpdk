@@ -8,10 +8,13 @@
 /* Forward declarations. */
 struct mlx5_rxq_priv;
 struct mlx5_txq_ctrl;
+struct mlx5_qp_ctrl;
 
 void mlx5_driver_event_notify_rxq_create(struct mlx5_rxq_priv *rxq);
 void mlx5_driver_event_notify_rxq_destroy(struct mlx5_rxq_priv *rxq);
 
+
+void mlx5_driver_event_notify_qp_txq_create(struct mlx5_qp_ctrl *qp_ctrl);
 void mlx5_driver_event_notify_txq_create(struct mlx5_txq_ctrl *txq_ctrl);
 void mlx5_driver_event_notify_txq_destroy(struct mlx5_txq_ctrl *txq_ctrl);
 

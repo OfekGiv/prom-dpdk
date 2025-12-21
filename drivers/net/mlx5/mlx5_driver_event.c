@@ -11,6 +11,7 @@
 #include "mlx5.h"
 #include "mlx5_rx.h"
 #include "mlx5_tx.h"
+#include "mlx5_qp.h"
 #include "rte_pmd_mlx5.h"
 
 /*
@@ -125,6 +126,20 @@ mlx5_driver_event_notify_rxq_destroy(struct mlx5_rxq_priv *rxq)
 	notify_rxq_event(rxq, RTE_PMD_MLX5_DRIVER_EVENT_CB_TYPE_RXQ_DESTROY);
 }
 
+
+static void
+fill_qp_txq_info(struct mlx5_qp_ctrl *qp_ctrl,
+	      struct rte_pmd_mlx5_driver_event_cb_queue_info *queue)
+{
+	/* It is assumed that port is started so all control structs should be initialized. */
+	MLX5_ASSERT(qp_ctrl != NULL);
+	MLX5_ASSERT(qp_ctrl->obj != NULL);
+
+	queue->dpdk_queue_id = qp_ctrl->qp.qp_idx;
+	MLX5_ASSERT(qp_ctrl->obj->qp_obj.qp != NULL);
+	queue->hw_queue_id = qp_ctrl->obj->qp_obj.qp->id;
+}
+
 static void
 fill_txq_info(struct mlx5_txq_ctrl *txq_ctrl,
 	      struct rte_pmd_mlx5_driver_event_cb_queue_info *queue)
@@ -141,6 +156,31 @@ fill_txq_info(struct mlx5_txq_ctrl *txq_ctrl,
 		MLX5_ASSERT(txq_ctrl->obj->sq_obj.sq != NULL);
 		queue->hw_queue_id = txq_ctrl->obj->sq_obj.sq->id;
 	}
+}
+
+
+static void
+notify_qp_txq_event(struct mlx5_qp_ctrl *qp_ctrl,
+		 enum rte_pmd_mlx5_driver_event_cb_type event)
+{
+	struct rte_pmd_mlx5_driver_event_cb_info cb_info = {
+		.event = event,
+	};
+	struct registered_cb *r;
+	uint16_t port_id;
+
+	MLX5_ASSERT(qp_ctrl != NULL);
+	MLX5_ASSERT(event == RTE_PMD_MLX5_DRIVER_EVENT_CB_TYPE_TXQ_CREATE ||
+		    event == RTE_PMD_MLX5_DRIVER_EVENT_CB_TYPE_TXQ_DESTROY);
+
+	if (LIST_EMPTY(&cb_list_head))
+		return;
+
+	port_id = qp_ctrl->priv->dev_data->port_id;
+	fill_qp_txq_info(qp_ctrl, &cb_info.queue);
+
+	LIST_FOREACH(r, &cb_list_head, list)
+		r->cb(port_id, &cb_info, r->opaque);
 }
 
 static void
@@ -165,6 +205,12 @@ notify_txq_event(struct mlx5_txq_ctrl *txq_ctrl,
 
 	LIST_FOREACH(r, &cb_list_head, list)
 		r->cb(port_id, &cb_info, r->opaque);
+}
+
+void
+mlx5_driver_event_notify_qp_txq_create(struct mlx5_qp_ctrl *qp_ctrl)
+{
+	notify_qp_txq_event(qp_ctrl, RTE_PMD_MLX5_DRIVER_EVENT_CB_TYPE_TXQ_CREATE);
 }
 
 void

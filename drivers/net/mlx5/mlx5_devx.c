@@ -1727,6 +1727,8 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 			(uint32_t)mlx5_dev_get_max_wq_size(priv->sh));
 	log_desc_n = log2above(wqe_n);
 
+
+
 	// Create devx SQ resources for master QP only
 	qp_attr.pd = sh->cdev->pdn;
 	qp_attr.uar_index = mlx5_os_get_devx_uar_page_id(priv->sh->tx_uar.obj);
@@ -1741,6 +1743,55 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 		rte_errno = errno;
 		goto error;
 	}
+
+
+	/* Create the Work Queue. */
+	qp_data->sq_wqe_n = log_desc_n;
+	qp_data->sq_wqe_s = 1 << qp_data->sq_wqe_n;
+	qp_data->sq_wqe_m = qp_data->sq_wqe_s - 1;
+	qp_data->sq_wqes = (struct mlx5_wqe *)(uintptr_t)qp_obj->qp_obj.wqes;
+	qp_data->sq_wqes_end = qp_data->sq_wqes + qp_data->sq_wqe_s;
+	qp_data->sq_wqe_ci = 0;
+	qp_data->sq_wqe_pi = 0;
+	qp_data->sq_wqe_comp = 0;
+	qp_data->sq_wqe_thres = qp_data->sq_wqe_s / MLX5_TX_COMP_THRESH_INLINE_DIV;
+	qp_data->sq_db = &qp_obj->qp_obj.db_rec[MLX5_SND_DBR];
+	*qp_data->sq_db = 0;
+	//qp_data->qp_num_8s = qp_obj->sq_obj.sq->id << 8;
+	qp_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
+	qp_data->db_nc = sh->tx_uar.dbnc;
+	qp_data->wait_on_time = !!(!sh->config.tx_pp &&
+
+				    sh->cdev->config.hca_attr.wait_on_time);
+
+	/* Change Send Queue state to Ready-to-Send. */
+	ret = mlx5_devx_qp2rts(&qp_obj->qp_obj,qp_obj->qp_obj.qp->id);
+	//ret = mlx5_txq_devx_modify(txq_obj, MLX5_TXQ_MOD_RST2RDY, 0);
+	if (ret) {
+		rte_errno = errno;
+		DRV_LOG(ERR,
+			"Port %u QP Tx queue %u SQ state to RST2RTS failed.",
+			dev->data->port_id, idx);
+		goto error;
+	}
+
+#ifdef HAVE_IBV_FLOW_DV_SUPPORT
+	/*
+	 * If using DevX need to query and store TIS transport domain value.
+	 * This is done once per port.
+	 * Will use this value on Rx, when creating matching TIR.
+	 */
+	if (!priv->sh->tdn)
+		priv->sh->tdn = priv->sh->td->id;
+#endif
+	qp_ctrl->uar_mmap_offset =
+			mlx5_os_get_devx_uar_mmap_offset(sh->tx_uar.obj);
+	if (priv->sh->config.txq_mem_algn)
+		priv->consec_tx_mem.cq_cur_off += qp_data->cq_mem_len;
+	ppriv->uar_table[qp_data->qp_idx] = sh->tx_uar.bf_db;
+	dev->data->tx_queue_state[idx] = RTE_ETH_QUEUE_STATE_STARTED;
+	/* Notify external users that Tx queue was created. */
+	mlx5_driver_event_notify_qp_txq_create(qp_ctrl);
 
 	return 0;
 

@@ -34,13 +34,13 @@ enum mlx5_qp_dir {
 };
 
 /* TX burst subroutines return codes. */
-enum mlx5_txcmp_code {
-	MLX5_TXCMP_CODE_EXIT = 0,
-	MLX5_TXCMP_CODE_ERROR,
-	MLX5_TXCMP_CODE_SINGLE,
-	MLX5_TXCMP_CODE_MULTI,
-	MLX5_TXCMP_CODE_TSO,
-	MLX5_TXCMP_CODE_EMPW,
+enum MLX5_QP_TXCMP_CODE {
+	MLX5_QP_TXCMP_CODE_EXIT = 0,
+	MLX5_QP_TXCMP_CODE_ERROR,
+	MLX5_QP_TXCMP_CODE_SINGLE,
+	MLX5_QP_TXCMP_CODE_MULTI,
+	MLX5_QP_TXCMP_CODE_TSO,
+	MLX5_QP_TXCMP_CODE_EMPW,
 };
 
 #define MLX5_TXOFF_CONFIG_MULTI (1u << 0) /* Multi-segment packets.*/
@@ -205,7 +205,40 @@ struct mlx5_qp_ctrl {
 };
 
 void mlx5_qp_tx_handle_completion(struct mlx5_qp_data *__rte_restrict qp_txq, unsigned int olx __rte_unused);
+void qp_txq_free_elts(struct mlx5_qp_ctrl *qp_txq_ctrl);
 
+
+#define MLX5_QP_TXOFF_PRE_DECL(func) \
+uint16_t mlx5_qp_tx_burst_##func(void *qp_txq, \
+			      struct rte_mbuf **pkts, \
+			      uint16_t pkts_n)
+
+#define MLX5_QP_TXOFF_DECL(func, olx) \
+uint16_t mlx5_qp_tx_burst_##func(void *qp_txq, \
+			      struct rte_mbuf **pkts, \
+			      uint16_t pkts_n) \
+{ \
+	return mlx5_qp_tx_burst_tmpl((struct mlx5_qp_data *)qp_txq, \
+		    pkts, pkts_n, (olx)); \
+}
+
+/* mlx5_tx_empw.c */
+
+MLX5_QP_TXOFF_PRE_DECL(full_empw);
+MLX5_QP_TXOFF_PRE_DECL(none_empw);
+MLX5_QP_TXOFF_PRE_DECL(md_empw);
+MLX5_QP_TXOFF_PRE_DECL(mt_empw);
+MLX5_QP_TXOFF_PRE_DECL(mtsc_empw);
+MLX5_QP_TXOFF_PRE_DECL(mti_empw);
+MLX5_QP_TXOFF_PRE_DECL(mtv_empw);
+MLX5_QP_TXOFF_PRE_DECL(mtiv_empw);
+MLX5_QP_TXOFF_PRE_DECL(sc_empw);
+MLX5_QP_TXOFF_PRE_DECL(sci_empw);
+MLX5_QP_TXOFF_PRE_DECL(scv_empw);
+MLX5_QP_TXOFF_PRE_DECL(sciv_empw);
+MLX5_QP_TXOFF_PRE_DECL(i_empw);
+MLX5_QP_TXOFF_PRE_DECL(v_empw);
+MLX5_QP_TXOFF_PRE_DECL(iv_empw);
 
 /**
  * Read real time clock counter directly from the device PCI BAR area.
@@ -218,7 +251,7 @@ void mlx5_qp_tx_handle_completion(struct mlx5_qp_data *__rte_restrict qp_txq, un
  *   0 - if HCA BAR is not supported or not mapped.
  *   !=0 - read 64-bit value of real-time in UTC formatv (nanoseconds)
  */
-static __rte_always_inline uint64_t mlx5_read_pcibar_clock(struct rte_eth_dev *dev)
+static __rte_always_inline uint64_t mlx5_qp_read_pcibar_clock(struct rte_eth_dev *dev)
 {
 	struct mlx5_proc_priv *ppriv = dev->process_private;
 
@@ -379,12 +412,12 @@ __mlx5_qp_tx_free_mbuf(struct mlx5_qp_data *__rte_restrict qp_txq,
 }
 
 
-static __rte_always_inline uint64_t mlx5_read_pcibar_clock_from_qp_txq(struct mlx5_qp_data *qp_txq)
+static __rte_always_inline uint64_t mlx5_qp_read_pcibar_clock_from_qp_txq(struct mlx5_qp_data *qp_txq)
 {
 	struct mlx5_qp_ctrl *qp_txq_ctrl = container_of(qp_txq, struct mlx5_qp_ctrl, qp);
 	struct rte_eth_dev *dev = ETH_DEV(qp_txq_ctrl->priv);
 
-	return mlx5_read_pcibar_clock(dev);
+	return mlx5_qp_read_pcibar_clock(dev);
 }
 
 
@@ -512,7 +545,7 @@ mlx5_qp_tx_cseg_init(struct mlx5_qp_data *__rte_restrict qp_txq,
 				     MLX5_COMP_MODE_OFFSET);
 	cs->misc = RTE_BE32(0);
 	if (__rte_trace_point_fp_is_enabled()) {
-		real_time = mlx5_read_pcibar_clock_from_qp_txq(qp_txq);
+		real_time = mlx5_qp_read_pcibar_clock_from_qp_txq(qp_txq);
 		if (!loc->pkts_sent)
 			rte_pmd_mlx5_trace_tx_entry(real_time, qp_txq->port_id, qp_txq->qp_idx);
 		rte_pmd_mlx5_trace_tx_wqe(real_time, (qp_txq->sq_wqe_ci << 8) | opcode);
@@ -969,12 +1002,12 @@ mlx5_qp_tx_eseg_mdat(struct mlx5_qp_data *__rte_restrict qp_txq,
  *   compile time and may be used for optimization.
  *
  * @return
- *   MLX5_TXCMP_CODE_EXIT - sending is done or impossible.
- *   MLX5_TXCMP_CODE_SINGLE - continue processing with the packet.
- *   MLX5_TXCMP_CODE_MULTI - the WAIT inserted, continue processing.
+ *   MLX5_QP_TXCMP_CODE_EXIT - sending is done or impossible.
+ *   MLX5_QP_TXCMP_CODE_SINGLE - continue processing with the packet.
+ *   MLX5_QP_TXCMP_CODE_MULTI - the WAIT inserted, continue processing.
  * Local context variables partially updated.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_schedule_send(struct mlx5_qp_data *restrict qp_txq,
 		      struct mlx5_qp_txq_local *restrict loc,
 		      uint16_t elts,
@@ -993,7 +1026,7 @@ mlx5_qp_tx_schedule_send(struct mlx5_qp_data *restrict qp_txq,
 		 */
 		if (loc->wqe_free <= MLX5_WQE_SIZE_MAX / MLX5_WQE_SIZE ||
 		    loc->elts_free < elts)
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		/* Convert the timestamp into completion to wait. */
 		ts = *RTE_MBUF_DYNFIELD(loc->mbuf, qp_txq->ts_offset, uint64_t *);
 		if (qp_txq->ts_last && ts < qp_txq->ts_last)
@@ -1018,7 +1051,7 @@ mlx5_qp_tx_schedule_send(struct mlx5_qp_data *restrict qp_txq,
 
 			wci = mlx5_txpp_convert_qp_tx_ts(sh, ts);
 			if (unlikely(wci < 0))
-				return MLX5_TXCMP_CODE_SINGLE;
+				return MLX5_QP_TXCMP_CODE_SINGLE;
 			/* Build the WAIT WQE with specified completion. */
 			rte_pmd_mlx5_trace_tx_wait(ts - sh->txpp.skew);
 			mlx5_qp_tx_cseg_init(qp_txq, loc, wqe,
@@ -1030,9 +1063,9 @@ mlx5_qp_tx_schedule_send(struct mlx5_qp_data *restrict qp_txq,
 		}
 		++qp_txq->sq_wqe_ci;
 		--loc->wqe_free;
-		return MLX5_TXCMP_CODE_MULTI;
+		return MLX5_QP_TXCMP_CODE_MULTI;
 	}
-	return MLX5_TXCMP_CODE_SINGLE;
+	return MLX5_QP_TXCMP_CODE_SINGLE;
 }
 
 
@@ -1275,11 +1308,11 @@ dseg_done:
  *   compile time and may be used for optimization.
  *
  * @return
- *   MLX5_TXCMP_CODE_EXIT - sending is done or impossible.
- *   MLX5_TXCMP_CODE_ERROR - some unrecoverable error occurred.
+ *   MLX5_QP_TXCMP_CODE_EXIT - sending is done or impossible.
+ *   MLX5_QP_TXCMP_CODE_ERROR - some unrecoverable error occurred.
  * Local context variables partially updated.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_packet_multi_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 			struct mlx5_qp_txq_local *__rte_restrict loc,
 			unsigned int olx)
@@ -1289,14 +1322,14 @@ mlx5_qp_tx_packet_multi_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 
 	MLX5_ASSERT(loc->elts_free >= NB_SEGS(loc->mbuf));
 	if (MLX5_TXOFF_CONFIG(TXPP)) {
-		enum mlx5_txcmp_code wret;
+		enum MLX5_QP_TXCMP_CODE wret;
 
 		/* Generate WAIT for scheduling if requested. */
 		wret = mlx5_qp_tx_schedule_send(qp_txq, loc, 0, olx);
-		if (wret == MLX5_TXCMP_CODE_EXIT)
-			return MLX5_TXCMP_CODE_EXIT;
-		if (wret == MLX5_TXCMP_CODE_ERROR)
-			return MLX5_TXCMP_CODE_ERROR;
+		if (wret == MLX5_QP_TXCMP_CODE_EXIT)
+			return MLX5_QP_TXCMP_CODE_EXIT;
+		if (wret == MLX5_QP_TXCMP_CODE_ERROR)
+			return MLX5_QP_TXCMP_CODE_ERROR;
 	}
 	/*
 	 * Calculate data length to be inlined to estimate
@@ -1308,14 +1341,14 @@ mlx5_qp_tx_packet_multi_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 	inlen = loc->mbuf->l2_len + vlan +
 		loc->mbuf->l3_len + loc->mbuf->l4_len;
 	if (unlikely((!inlen || !loc->mbuf->tso_segsz)))
-		return MLX5_TXCMP_CODE_ERROR;
+		return MLX5_QP_TXCMP_CODE_ERROR;
 	if (loc->mbuf->ol_flags & RTE_MBUF_F_TX_TUNNEL_MASK)
 		inlen += loc->mbuf->outer_l2_len + loc->mbuf->outer_l3_len;
 	/* Packet must contain all TSO headers. */
 	if (unlikely(inlen > MLX5_MAX_TSO_HEADER ||
 		     inlen <= MLX5_ESEG_MIN_INLINE_SIZE ||
 		     inlen > (dlen + vlan)))
-		return MLX5_TXCMP_CODE_ERROR;
+		return MLX5_QP_TXCMP_CODE_ERROR;
 	/*
 	 * Check whether there are enough free WQEBBs:
 	 * - Control Segment
@@ -1329,10 +1362,10 @@ mlx5_qp_tx_packet_multi_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 				       MLX5_WSEG_SIZE +
 				       MLX5_WSEG_SIZE - 1) / MLX5_WSEG_SIZE;
 	if (unlikely(loc->wqe_free < ((ds + 3) / 4)))
-		return MLX5_TXCMP_CODE_EXIT;
+		return MLX5_QP_TXCMP_CODE_EXIT;
 	/* Check for maximal WQE size. */
 	if (unlikely((MLX5_WQE_SIZE_MAX / MLX5_WSEG_SIZE) < ds))
-		return MLX5_TXCMP_CODE_ERROR;
+		return MLX5_QP_TXCMP_CODE_ERROR;
 #ifdef MLX5_PMD_SOFT_COUNTERS
 	/* Update sent data bytes/packets counters. */
 	ntcp = (dlen - (inlen - vlan) + loc->mbuf->tso_segsz - 1) /
@@ -1353,7 +1386,7 @@ mlx5_qp_tx_packet_multi_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 	wqe->cseg.sq_ds = rte_cpu_to_be_32(qp_txq->qp_num_8s | ds);
 	qp_txq->sq_wqe_ci += (ds + 3) / 4;
 	loc->wqe_free -= (ds + 3) / 4;
-	return MLX5_TXCMP_CODE_MULTI;
+	return MLX5_QP_TXCMP_CODE_MULTI;
 }
 
 
@@ -1428,11 +1461,11 @@ mlx5_qp_tx_eseg_none(struct mlx5_qp_data *__rte_restrict qp_txq __rte_unused,
  *   compile time and may be used for optimization.
  *
  * @return
- *   MLX5_TXCMP_CODE_EXIT - sending is done or impossible.
- *   MLX5_TXCMP_CODE_ERROR - some unrecoverable error occurred.
+ *   MLX5_QP_TXCMP_CODE_EXIT - sending is done or impossible.
+ *   MLX5_QP_TXCMP_CODE_ERROR - some unrecoverable error occurred.
  * Local context variables partially updated.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_packet_multi_send(struct mlx5_qp_data *__rte_restrict qp_txq,
 			  struct mlx5_qp_txq_local *__rte_restrict loc,
 			  unsigned int olx)
@@ -1444,14 +1477,14 @@ mlx5_qp_tx_packet_multi_send(struct mlx5_qp_data *__rte_restrict qp_txq,
 	MLX5_ASSERT(NB_SEGS(loc->mbuf) > 1);
 	MLX5_ASSERT(loc->elts_free >= NB_SEGS(loc->mbuf));
 	if (MLX5_TXOFF_CONFIG(TXPP)) {
-		enum mlx5_txcmp_code wret;
+		enum MLX5_QP_TXCMP_CODE wret;
 
 		/* Generate WAIT for scheduling if requested. */
 		wret = mlx5_qp_tx_schedule_send(qp_txq, loc, 0, olx);
-		if (wret == MLX5_TXCMP_CODE_EXIT)
-			return MLX5_TXCMP_CODE_EXIT;
-		if (wret == MLX5_TXCMP_CODE_ERROR)
-			return MLX5_TXCMP_CODE_ERROR;
+		if (wret == MLX5_QP_TXCMP_CODE_EXIT)
+			return MLX5_QP_TXCMP_CODE_EXIT;
+		if (wret == MLX5_QP_TXCMP_CODE_ERROR)
+			return MLX5_QP_TXCMP_CODE_ERROR;
 	}
 	/*
 	 * No inline at all, it means the CPU cycles saving is prioritized at
@@ -1460,16 +1493,16 @@ mlx5_qp_tx_packet_multi_send(struct mlx5_qp_data *__rte_restrict qp_txq,
 	nseg = NB_SEGS(loc->mbuf);
 	ds = 2 + nseg;
 	if (unlikely(loc->wqe_free < ((ds + 3) / 4)))
-		return MLX5_TXCMP_CODE_EXIT;
+		return MLX5_QP_TXCMP_CODE_EXIT;
 	/* Check for maximal WQE size. */
 	if (unlikely((MLX5_WQE_SIZE_MAX / MLX5_WSEG_SIZE) < ds))
-		return MLX5_TXCMP_CODE_ERROR;
+		return MLX5_QP_TXCMP_CODE_ERROR;
 	/*
 	 * Some Tx offloads may cause an error if packet is not long enough,
 	 * check against assumed minimal length.
 	 */
 	if (rte_pktmbuf_pkt_len(loc->mbuf) <= MLX5_ESEG_MIN_INLINE_SIZE)
-		return MLX5_TXCMP_CODE_ERROR;
+		return MLX5_QP_TXCMP_CODE_ERROR;
 #ifdef MLX5_PMD_SOFT_COUNTERS
 	/* Update sent data bytes counter. */
 	qp_txq->stats.obytes += rte_pktmbuf_pkt_len(loc->mbuf);
@@ -1524,7 +1557,7 @@ mlx5_qp_tx_packet_multi_send(struct mlx5_qp_data *__rte_restrict qp_txq,
 	} while (true);
 	qp_txq->sq_wqe_ci += (ds + 3) / 4;
 	loc->wqe_free -= (ds + 3) / 4;
-	return MLX5_TXCMP_CODE_MULTI;
+	return MLX5_QP_TXCMP_CODE_MULTI;
 }
 
 /**
@@ -1545,11 +1578,11 @@ mlx5_qp_tx_packet_multi_send(struct mlx5_qp_data *__rte_restrict qp_txq,
  *   compile time and may be used for optimization.
  *
  * @return
- *   MLX5_TXCMP_CODE_EXIT - sending is done or impossible.
- *   MLX5_TXCMP_CODE_ERROR - some unrecoverable error occurred.
+ *   MLX5_QP_TXCMP_CODE_EXIT - sending is done or impossible.
+ *   MLX5_QP_TXCMP_CODE_ERROR - some unrecoverable error occurred.
  * Local context variables partially updated.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_packet_multi_inline(struct mlx5_qp_data *__rte_restrict qp_txq,
 			    struct mlx5_qp_txq_local *__rte_restrict loc,
 			    unsigned int olx)
@@ -1570,7 +1603,7 @@ mlx5_qp_tx_packet_multi_inline(struct mlx5_qp_data *__rte_restrict qp_txq,
 	inlen = dlen + vlan;
 	/* Check against minimal length. */
 	if (inlen <= MLX5_ESEG_MIN_INLINE_SIZE)
-		return MLX5_TXCMP_CODE_ERROR;
+		return MLX5_QP_TXCMP_CODE_ERROR;
 	MLX5_ASSERT(qp_txq->inlen_send >= MLX5_ESEG_MIN_INLINE_SIZE);
 	if (inlen > qp_txq->inlen_send ||
 	    loc->mbuf->ol_flags & RTE_MBUF_F_TX_DYNF_NOINLINE) {
@@ -1668,14 +1701,14 @@ do_align:
 	 */
 do_build:
 	if (MLX5_TXOFF_CONFIG(TXPP)) {
-		enum mlx5_txcmp_code wret;
+		enum MLX5_QP_TXCMP_CODE wret;
 
 		/* Generate WAIT for scheduling if requested. */
 		wret = mlx5_qp_tx_schedule_send(qp_txq, loc, 0, olx);
-		if (wret == MLX5_TXCMP_CODE_EXIT)
-			return MLX5_TXCMP_CODE_EXIT;
-		if (wret == MLX5_TXCMP_CODE_ERROR)
-			return MLX5_TXCMP_CODE_ERROR;
+		if (wret == MLX5_QP_TXCMP_CODE_EXIT)
+			return MLX5_QP_TXCMP_CODE_EXIT;
+		if (wret == MLX5_QP_TXCMP_CODE_ERROR)
+			return MLX5_QP_TXCMP_CODE_ERROR;
 	}
 	MLX5_ASSERT(inlen <= qp_txq->inlen_send);
 	ds = NB_SEGS(loc->mbuf) + 2 + (inlen -
@@ -1683,7 +1716,7 @@ do_build:
 				       MLX5_WSEG_SIZE +
 				       MLX5_WSEG_SIZE - 1) / MLX5_WSEG_SIZE;
 	if (unlikely(loc->wqe_free < ((ds + 3) / 4)))
-		return MLX5_TXCMP_CODE_EXIT;
+		return MLX5_QP_TXCMP_CODE_EXIT;
 	/* Check for maximal WQE size. */
 	if (unlikely((MLX5_WQE_SIZE_MAX / MLX5_WSEG_SIZE) < ds)) {
 		/*  Check if we can adjust the inline length. */
@@ -1694,7 +1727,7 @@ do_build:
 				MLX5_WSEG_SIZE +
 				MLX5_WSEG_SIZE - 1) / MLX5_WSEG_SIZE;
 			if (unlikely((MLX5_WQE_SIZE_MAX / MLX5_WSEG_SIZE) < ds))
-				return MLX5_TXCMP_CODE_ERROR;
+				return MLX5_QP_TXCMP_CODE_ERROR;
 		}
 		/* We have lucky opportunity to adjust. */
 		inlen = RTE_MIN(inlen, MLX5_WQE_SIZE_MAX -
@@ -1715,7 +1748,7 @@ do_build:
 	wqe->cseg.sq_ds = rte_cpu_to_be_32(qp_txq->qp_num_8s | ds);
 	qp_txq->sq_wqe_ci += (ds + 3) / 4;
 	loc->wqe_free -= (ds + 3) / 4;
-	return MLX5_TXCMP_CODE_MULTI;
+	return MLX5_QP_TXCMP_CODE_MULTI;
 }
 
 /**
@@ -1740,13 +1773,13 @@ do_build:
  *   compile time and may be used for optimization.
  *
  * @return
- *   MLX5_TXCMP_CODE_EXIT - sending is done or impossible.
- *   MLX5_TXCMP_CODE_ERROR - some unrecoverable error occurred.
- *   MLX5_TXCMP_CODE_SINGLE - single-segment packet encountered.
- *   MLX5_TXCMP_CODE_TSO - TSO single-segment packet encountered.
+ *   MLX5_QP_TXCMP_CODE_EXIT - sending is done or impossible.
+ *   MLX5_QP_TXCMP_CODE_ERROR - some unrecoverable error occurred.
+ *   MLX5_QP_TXCMP_CODE_SINGLE - single-segment packet encountered.
+ *   MLX5_QP_TXCMP_CODE_TSO - TSO single-segment packet encountered.
  * Local context variables updated.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_burst_mseg(struct mlx5_qp_data *__rte_restrict qp_txq,
 		   struct rte_mbuf **__rte_restrict pkts,
 		   unsigned int pkts_n,
@@ -1758,7 +1791,7 @@ mlx5_qp_tx_burst_mseg(struct mlx5_qp_data *__rte_restrict qp_txq,
 	pkts += loc->pkts_sent + 1;
 	pkts_n -= loc->pkts_sent;
 	for (;;) {
-		enum mlx5_txcmp_code ret;
+		enum MLX5_QP_TXCMP_CODE ret;
 
 		MLX5_ASSERT(NB_SEGS(loc->mbuf) > 1);
 		/*
@@ -1767,7 +1800,7 @@ mlx5_qp_tx_burst_mseg(struct mlx5_qp_data *__rte_restrict qp_txq,
 		 * ignore this here - precise estimation is costly.
 		 */
 		if (loc->elts_free < NB_SEGS(loc->mbuf))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		if (MLX5_TXOFF_CONFIG(TSO) &&
 		    unlikely(loc->mbuf->ol_flags & RTE_MBUF_F_TX_TCP_SEG)) {
 			/* Proceed with multi-segment TSO. */
@@ -1779,15 +1812,15 @@ mlx5_qp_tx_burst_mseg(struct mlx5_qp_data *__rte_restrict qp_txq,
 			/* Proceed with multi-segment SEND w/o inlining. */
 			ret = mlx5_qp_tx_packet_multi_send(qp_txq, loc, olx);
 		}
-		if (ret == MLX5_TXCMP_CODE_EXIT)
-			return MLX5_TXCMP_CODE_EXIT;
-		if (ret == MLX5_TXCMP_CODE_ERROR)
-			return MLX5_TXCMP_CODE_ERROR;
+		if (ret == MLX5_QP_TXCMP_CODE_EXIT)
+			return MLX5_QP_TXCMP_CODE_EXIT;
+		if (ret == MLX5_QP_TXCMP_CODE_ERROR)
+			return MLX5_QP_TXCMP_CODE_ERROR;
 		/* WQE is built, go to the next packet. */
 		++loc->pkts_sent;
 		--pkts_n;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		loc->mbuf = *pkts++;
 		if (pkts_n > 1)
 			rte_prefetch0(*pkts);
@@ -1796,8 +1829,8 @@ mlx5_qp_tx_burst_mseg(struct mlx5_qp_data *__rte_restrict qp_txq,
 		/* Here ends the series of multi-segment packets. */
 		if (MLX5_TXOFF_CONFIG(TSO) &&
 		    unlikely(loc->mbuf->ol_flags & RTE_MBUF_F_TX_TCP_SEG))
-			return MLX5_TXCMP_CODE_TSO;
-		return MLX5_TXCMP_CODE_SINGLE;
+			return MLX5_QP_TXCMP_CODE_TSO;
+		return MLX5_QP_TXCMP_CODE_SINGLE;
 	}
 	MLX5_ASSERT(false);
 }
@@ -1945,13 +1978,13 @@ mlx5_qp_tx_eseg_data(struct mlx5_qp_data *__rte_restrict qp_txq,
  *   compile time and may be used for optimization.
  *
  * @return
- *   MLX5_TXCMP_CODE_EXIT - sending is done or impossible.
- *   MLX5_TXCMP_CODE_ERROR - some unrecoverable error occurred.
- *   MLX5_TXCMP_CODE_SINGLE - single-segment packet encountered.
- *   MLX5_TXCMP_CODE_MULTI - multi-segment packet encountered.
+ *   MLX5_QP_TXCMP_CODE_EXIT - sending is done or impossible.
+ *   MLX5_QP_TXCMP_CODE_ERROR - some unrecoverable error occurred.
+ *   MLX5_QP_TXCMP_CODE_SINGLE - single-segment packet encountered.
+ *   MLX5_QP_TXCMP_CODE_MULTI - multi-segment packet encountered.
  * Local context variables updated.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_burst_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 		  struct rte_mbuf **__rte_restrict pkts,
 		  unsigned int pkts_n,
@@ -1970,14 +2003,14 @@ mlx5_qp_tx_burst_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 
 		MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
 		if (MLX5_TXOFF_CONFIG(TXPP)) {
-			enum mlx5_txcmp_code wret;
+			enum MLX5_QP_TXCMP_CODE wret;
 
 			/* Generate WAIT for scheduling if requested. */
 			wret = mlx5_qp_tx_schedule_send(qp_txq, loc, 1, olx);
-			if (wret == MLX5_TXCMP_CODE_EXIT)
-				return MLX5_TXCMP_CODE_EXIT;
-			if (wret == MLX5_TXCMP_CODE_ERROR)
-				return MLX5_TXCMP_CODE_ERROR;
+			if (wret == MLX5_QP_TXCMP_CODE_EXIT)
+				return MLX5_QP_TXCMP_CODE_EXIT;
+			if (wret == MLX5_QP_TXCMP_CODE_ERROR)
+				return MLX5_QP_TXCMP_CODE_ERROR;
 		}
 		dlen = rte_pktmbuf_data_len(loc->mbuf);
 		if (MLX5_TXOFF_CONFIG(VLAN) &&
@@ -1991,7 +2024,7 @@ mlx5_qp_tx_burst_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 		hlen = loc->mbuf->l2_len + vlan +
 		       loc->mbuf->l3_len + loc->mbuf->l4_len;
 		if (unlikely((!hlen || !loc->mbuf->tso_segsz)))
-			return MLX5_TXCMP_CODE_ERROR;
+			return MLX5_QP_TXCMP_CODE_ERROR;
 		if (loc->mbuf->ol_flags & RTE_MBUF_F_TX_TUNNEL_MASK)
 			hlen += loc->mbuf->outer_l2_len +
 				loc->mbuf->outer_l3_len;
@@ -1999,7 +2032,7 @@ mlx5_qp_tx_burst_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 		if (unlikely(hlen > MLX5_MAX_TSO_HEADER ||
 			     hlen <= MLX5_ESEG_MIN_INLINE_SIZE ||
 			     hlen > (dlen + vlan)))
-			return MLX5_TXCMP_CODE_ERROR;
+			return MLX5_QP_TXCMP_CODE_ERROR;
 		/*
 		 * Check whether there are enough free WQEBBs:
 		 * - Control Segment
@@ -2011,7 +2044,7 @@ mlx5_qp_tx_burst_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 		ds = 4 + (hlen - MLX5_ESEG_MIN_INLINE_SIZE +
 			  MLX5_WSEG_SIZE - 1) / MLX5_WSEG_SIZE;
 		if (loc->wqe_free < ((ds + 3) / 4))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 #ifdef MLX5_PMD_SOFT_COUNTERS
 		/* Update sent data bytes/packets counters. */
 		ntcp = (dlen + vlan - hlen +
@@ -2051,15 +2084,15 @@ mlx5_qp_tx_burst_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 		++loc->pkts_sent;
 		--pkts_n;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		loc->mbuf = *pkts++;
 		if (pkts_n > 1)
 			rte_prefetch0(*pkts);
 		if (MLX5_TXOFF_CONFIG(MULTI) &&
 		    unlikely(NB_SEGS(loc->mbuf) > 1))
-			return MLX5_TXCMP_CODE_MULTI;
+			return MLX5_QP_TXCMP_CODE_MULTI;
 		if (likely(!(loc->mbuf->ol_flags & RTE_MBUF_F_TX_TCP_SEG)))
-			return MLX5_TXCMP_CODE_SINGLE;
+			return MLX5_QP_TXCMP_CODE_SINGLE;
 		/* Continue with the next TSO packet. */
 	}
 	MLX5_ASSERT(false);
@@ -2083,12 +2116,12 @@ mlx5_qp_tx_burst_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
  *   multi-segment packets and TSO.
  *
  * @return
- *  MLX5_TXCMP_CODE_MULTI - multi-segment packet encountered.
- *  MLX5_TXCMP_CODE_TSO - TSO required, use TSO/LSO.
- *  MLX5_TXCMP_CODE_SINGLE - single-segment packet, use SEND.
- *  MLX5_TXCMP_CODE_EMPW - single-segment packet, use MPW.
+ *  MLX5_QP_TXCMP_CODE_MULTI - multi-segment packet encountered.
+ *  MLX5_QP_TXCMP_CODE_TSO - TSO required, use TSO/LSO.
+ *  MLX5_QP_TXCMP_CODE_SINGLE - single-segment packet, use SEND.
+ *  MLX5_QP_TXCMP_CODE_EMPW - single-segment packet, use MPW.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_able_to_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
 		     struct mlx5_qp_txq_local *__rte_restrict loc,
 		     unsigned int olx,
@@ -2098,15 +2131,15 @@ mlx5_qp_tx_able_to_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
 	if (newp &&
 	    MLX5_TXOFF_CONFIG(MULTI) &&
 	    unlikely(NB_SEGS(loc->mbuf) > 1))
-		return MLX5_TXCMP_CODE_MULTI;
+		return MLX5_QP_TXCMP_CODE_MULTI;
 	/* Check for TSO packet. */
 	if (newp &&
 	    MLX5_TXOFF_CONFIG(TSO) &&
 	    unlikely(loc->mbuf->ol_flags & RTE_MBUF_F_TX_TCP_SEG))
-		return MLX5_TXCMP_CODE_TSO;
+		return MLX5_QP_TXCMP_CODE_TSO;
 	/* Check if eMPW is enabled at all. */
 	if (!MLX5_TXOFF_CONFIG(EMPW))
-		return MLX5_TXCMP_CODE_SINGLE;
+		return MLX5_QP_TXCMP_CODE_SINGLE;
 	/* Check if eMPW can be engaged. */
 	if (MLX5_TXOFF_CONFIG(VLAN) &&
 	    unlikely(loc->mbuf->ol_flags & RTE_MBUF_F_TX_VLAN) &&
@@ -2117,9 +2150,9 @@ mlx5_qp_tx_able_to_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
 		 * eMPW does not support VLAN insertion offload, we have to
 		 * inline the entire packet but packet is too long for inlining.
 		 */
-		return MLX5_TXCMP_CODE_SINGLE;
+		return MLX5_QP_TXCMP_CODE_SINGLE;
 	}
-	return MLX5_TXCMP_CODE_EMPW;
+	return MLX5_QP_TXCMP_CODE_EMPW;
 }
 
 
@@ -2392,7 +2425,7 @@ mlx5_qp_tx_match_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
  * The routine sends packets with MLX5_OPCODE_EMPW
  * with inlining, optionally supports VLAN insertion.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_burst_empw_inline(struct mlx5_qp_data *__rte_restrict qp_txq,
 			  struct rte_mbuf **__rte_restrict pkts,
 			  unsigned int pkts_n,
@@ -2412,7 +2445,7 @@ mlx5_qp_tx_burst_empw_inline(struct mlx5_qp_data *__rte_restrict qp_txq,
 	for (;;) {
 		struct mlx5_wqe_dseg *__rte_restrict dseg;
 		struct mlx5_wqe *__rte_restrict wqem;
-		enum mlx5_txcmp_code ret;
+		enum MLX5_QP_TXCMP_CODE ret;
 		unsigned int room, part, nlim;
 		unsigned int slen = 0;
 
@@ -2425,19 +2458,19 @@ mlx5_qp_tx_burst_empw_inline(struct mlx5_qp_data *__rte_restrict qp_txq,
 				       MLX5_MPW_INLINE_MAX_PACKETS :
 				       MLX5_EMPW_MAX_PACKETS);
 		if (MLX5_TXOFF_CONFIG(TXPP)) {
-			enum mlx5_txcmp_code wret;
+			enum MLX5_QP_TXCMP_CODE wret;
 
 			/* Generate WAIT for scheduling if requested. */
 			wret = mlx5_qp_tx_schedule_send(qp_txq, loc, nlim, olx);
-			if (wret == MLX5_TXCMP_CODE_EXIT)
-				return MLX5_TXCMP_CODE_EXIT;
-			if (wret == MLX5_TXCMP_CODE_ERROR)
-				return MLX5_TXCMP_CODE_ERROR;
+			if (wret == MLX5_QP_TXCMP_CODE_EXIT)
+				return MLX5_QP_TXCMP_CODE_EXIT;
+			if (wret == MLX5_QP_TXCMP_CODE_ERROR)
+				return MLX5_QP_TXCMP_CODE_ERROR;
 		}
 		/* Check whether we have minimal amount WQEs */
 		if (unlikely(loc->wqe_free <
 			    ((2 + MLX5_EMPW_MIN_PACKETS + 3) / 4)))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		if (likely(pkts_n > 1))
 			rte_prefetch0(*pkts);
 		wqem = qp_txq->sq_wqes + (qp_txq->sq_wqe_ci & qp_txq->sq_wqe_m);
@@ -2485,14 +2518,14 @@ mlx5_qp_tx_burst_empw_inline(struct mlx5_qp_data *__rte_restrict qp_txq,
 			if (unlikely(dlen <= MLX5_ESEG_MIN_INLINE_SIZE)) {
 				part -= room;
 				if (unlikely(!part))
-					return MLX5_TXCMP_CODE_ERROR;
+					return MLX5_QP_TXCMP_CODE_ERROR;
 				/*
 				 * We have some successfully built
 				 * packet Data Segments to send.
 				 */
 				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
 						   slen, wqem, olx);
-				return MLX5_TXCMP_CODE_ERROR;
+				return MLX5_QP_TXCMP_CODE_ERROR;
 			}
 			/* Inline or not inline - that's the Question. */
 			if (dlen > qp_txq->inlen_empw ||
@@ -2612,7 +2645,7 @@ next_mbuf:
 				part -= room;
 				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
 						   slen, wqem, olx);
-				return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_EXIT;
 			}
 			loc->mbuf = *pkts++;
 			if (likely(pkts_n > 1))
@@ -2623,40 +2656,40 @@ next_mbuf:
 			 * returning variable value - it results in
 			 * unoptimized sequent checking in caller.
 			 */
-			if (ret == MLX5_TXCMP_CODE_MULTI) {
+			if (ret == MLX5_QP_TXCMP_CODE_MULTI) {
 				part -= room;
 				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
 						   slen, wqem, olx);
 				if (unlikely(!loc->elts_free ||
 					     !loc->wqe_free))
-					return MLX5_TXCMP_CODE_EXIT;
-				return MLX5_TXCMP_CODE_MULTI;
+					return MLX5_QP_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_MULTI;
 			}
 			MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
-			if (ret == MLX5_TXCMP_CODE_TSO) {
+			if (ret == MLX5_QP_TXCMP_CODE_TSO) {
 				part -= room;
 				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
 						   slen, wqem, olx);
 				if (unlikely(!loc->elts_free ||
 					     !loc->wqe_free))
-					return MLX5_TXCMP_CODE_EXIT;
-				return MLX5_TXCMP_CODE_TSO;
+					return MLX5_QP_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_TSO;
 			}
-			if (ret == MLX5_TXCMP_CODE_SINGLE) {
+			if (ret == MLX5_QP_TXCMP_CODE_SINGLE) {
 				part -= room;
 				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
 						   slen, wqem, olx);
 				if (unlikely(!loc->elts_free ||
 					     !loc->wqe_free))
-					return MLX5_TXCMP_CODE_EXIT;
-				return MLX5_TXCMP_CODE_SINGLE;
+					return MLX5_QP_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_SINGLE;
 			}
-			if (ret != MLX5_TXCMP_CODE_EMPW) {
+			if (ret != MLX5_QP_TXCMP_CODE_EMPW) {
 				MLX5_ASSERT(false);
 				part -= room;
 				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
 						   slen, wqem, olx);
-				return MLX5_TXCMP_CODE_ERROR;
+				return MLX5_QP_TXCMP_CODE_ERROR;
 			}
 			/* Check if we have minimal room left. */
 			nlim--;
@@ -2685,11 +2718,11 @@ next_mbuf:
 		MLX5_ASSERT(pkts_n);
 		part -= room;
 		if (unlikely(!part))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		mlx5_qp_tx_idone_empw(qp_txq, loc, part, slen, wqem, olx);
 		if (unlikely(!loc->elts_free ||
 			     !loc->wqe_free))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		/* Continue the loop with new eMPW session. */
 	}
 	MLX5_ASSERT(false);
@@ -2768,12 +2801,12 @@ mlx5_qp_tx_sdone_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
  *   compile time and may be used for optimization.
  *
  * @return
- *   MLX5_TXCMP_CODE_EXIT - sending is done or impossible.
- *   MLX5_TXCMP_CODE_ERROR - some unrecoverable error occurred.
- *   MLX5_TXCMP_CODE_MULTI - multi-segment packet encountered.
- *   MLX5_TXCMP_CODE_TSO - TSO packet encountered.
- *   MLX5_TXCMP_CODE_SINGLE - used inside functions set.
- *   MLX5_TXCMP_CODE_EMPW - used inside functions set.
+ *   MLX5_QP_TXCMP_CODE_EXIT - sending is done or impossible.
+ *   MLX5_QP_TXCMP_CODE_ERROR - some unrecoverable error occurred.
+ *   MLX5_QP_TXCMP_CODE_MULTI - multi-segment packet encountered.
+ *   MLX5_QP_TXCMP_CODE_TSO - TSO packet encountered.
+ *   MLX5_QP_TXCMP_CODE_SINGLE - used inside functions set.
+ *   MLX5_QP_TXCMP_CODE_EMPW - used inside functions set.
  *
  * Local context variables updated.
  *
@@ -2782,7 +2815,7 @@ mlx5_qp_tx_sdone_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
  * without inlining, this is dedicated optimized branch.
  * No VLAN insertion is supported.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_burst_empw_simple(struct mlx5_qp_data *__rte_restrict qp_txq,
 			  struct rte_mbuf **__rte_restrict pkts,
 			  unsigned int pkts_n,
@@ -2802,7 +2835,7 @@ mlx5_qp_tx_burst_empw_simple(struct mlx5_qp_data *__rte_restrict qp_txq,
 	for (;;) {
 		struct mlx5_wqe_dseg *__rte_restrict dseg;
 		struct mlx5_wqe_eseg *__rte_restrict eseg;
-		enum mlx5_txcmp_code ret;
+		enum MLX5_QP_TXCMP_CODE ret;
 		unsigned int part, loop;
 		unsigned int slen = 0;
 
@@ -2814,25 +2847,25 @@ next_empw:
 		if (unlikely(loc->elts_free < part)) {
 			/* We have no enough elts to save all mbufs. */
 			if (unlikely(loc->elts_free < MLX5_EMPW_MIN_PACKETS))
-				return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_EXIT;
 			/* But we still able to send at least minimal eMPW. */
 			part = loc->elts_free;
 		}
 		if (MLX5_TXOFF_CONFIG(TXPP)) {
-			enum mlx5_txcmp_code wret;
+			enum MLX5_QP_TXCMP_CODE wret;
 
 			/* Generate WAIT for scheduling if requested. */
 			wret = mlx5_qp_tx_schedule_send(qp_txq, loc, 0, olx);
-			if (wret == MLX5_TXCMP_CODE_EXIT)
-				return MLX5_TXCMP_CODE_EXIT;
-			if (wret == MLX5_TXCMP_CODE_ERROR)
-				return MLX5_TXCMP_CODE_ERROR;
+			if (wret == MLX5_QP_TXCMP_CODE_EXIT)
+				return MLX5_QP_TXCMP_CODE_EXIT;
+			if (wret == MLX5_QP_TXCMP_CODE_ERROR)
+				return MLX5_QP_TXCMP_CODE_ERROR;
 		}
 		/* Check whether we have enough WQEs */
 		if (unlikely(loc->wqe_free < ((2 + part + 3) / 4))) {
 			if (unlikely(loc->wqe_free <
 				((2 + MLX5_EMPW_MIN_PACKETS + 3) / 4)))
-				return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_EXIT;
 			part = (loc->wqe_free * 4) - 2;
 		}
 		if (likely(part > 1))
@@ -2876,36 +2909,36 @@ next_empw:
 			 * returning variable value - it results in
 			 * unoptimized sequent checking in caller.
 			 */
-			if (ret == MLX5_TXCMP_CODE_MULTI) {
+			if (ret == MLX5_QP_TXCMP_CODE_MULTI) {
 				part -= loop;
 				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
 				if (unlikely(!loc->elts_free ||
 					     !loc->wqe_free))
-					return MLX5_TXCMP_CODE_EXIT;
-				return MLX5_TXCMP_CODE_MULTI;
+					return MLX5_QP_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_MULTI;
 			}
 			MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
-			if (ret == MLX5_TXCMP_CODE_TSO) {
+			if (ret == MLX5_QP_TXCMP_CODE_TSO) {
 				part -= loop;
 				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
 				if (unlikely(!loc->elts_free ||
 					     !loc->wqe_free))
-					return MLX5_TXCMP_CODE_EXIT;
-				return MLX5_TXCMP_CODE_TSO;
+					return MLX5_QP_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_TSO;
 			}
-			if (ret == MLX5_TXCMP_CODE_SINGLE) {
+			if (ret == MLX5_QP_TXCMP_CODE_SINGLE) {
 				part -= loop;
 				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
 				if (unlikely(!loc->elts_free ||
 					     !loc->wqe_free))
-					return MLX5_TXCMP_CODE_EXIT;
-				return MLX5_TXCMP_CODE_SINGLE;
+					return MLX5_QP_TXCMP_CODE_EXIT;
+				return MLX5_QP_TXCMP_CODE_SINGLE;
 			}
-			if (ret != MLX5_TXCMP_CODE_EMPW) {
+			if (ret != MLX5_QP_TXCMP_CODE_EMPW) {
 				MLX5_ASSERT(false);
 				part -= loop;
 				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
-				return MLX5_TXCMP_CODE_ERROR;
+				return MLX5_QP_TXCMP_CODE_ERROR;
 			}
 			/*
 			 * Check whether packet parameters coincide
@@ -2922,7 +2955,7 @@ next_empw:
 				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
 				if (unlikely(!loc->elts_free ||
 					     !loc->wqe_free))
-					return MLX5_TXCMP_CODE_EXIT;
+					return MLX5_QP_TXCMP_CODE_EXIT;
 				pkts_n -= part;
 				goto next_empw;
 			}
@@ -2944,10 +2977,10 @@ next_empw:
 		loc->wqe_free -= (2 + part + 3) / 4;
 		pkts_n -= part;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		loc->mbuf = *pkts++;
 		ret = mlx5_qp_tx_able_to_empw(qp_txq, loc, olx, true);
-		if (unlikely(ret != MLX5_TXCMP_CODE_EMPW))
+		if (unlikely(ret != MLX5_QP_TXCMP_CODE_EMPW))
 			return ret;
 		/* Continue sending eMPW batches. */
 	}
@@ -3030,7 +3063,7 @@ mlx5_qp_tx_eseg_dmin(struct mlx5_qp_data *__rte_restrict qp_txq __rte_unused,
  * The routine sends packets with ordinary MLX5_OPCODE_SEND.
  * Data inlining and VLAN insertion are supported.
  */
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_burst_single_send(struct mlx5_qp_data *__rte_restrict qp_txq,
 			  struct rte_mbuf **__rte_restrict pkts,
 			  unsigned int pkts_n,
@@ -3047,19 +3080,19 @@ mlx5_qp_tx_burst_single_send(struct mlx5_qp_data *__rte_restrict qp_txq,
 	pkts_n -= loc->pkts_sent;
 	for (;;) {
 		struct mlx5_wqe *__rte_restrict wqe;
-		enum mlx5_txcmp_code ret;
+		enum MLX5_QP_TXCMP_CODE ret;
 
 		MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
 		MLX5_ASSERT(loc->elts_free);
 		if (MLX5_TXOFF_CONFIG(TXPP)) {
-			enum mlx5_txcmp_code wret;
+			enum MLX5_QP_TXCMP_CODE wret;
 
 			/* Generate WAIT for scheduling if requested. */
 			wret = mlx5_qp_tx_schedule_send(qp_txq, loc, 0, olx);
-			if (wret == MLX5_TXCMP_CODE_EXIT)
-				return MLX5_TXCMP_CODE_EXIT;
-			if (wret == MLX5_TXCMP_CODE_ERROR)
-				return MLX5_TXCMP_CODE_ERROR;
+			if (wret == MLX5_QP_TXCMP_CODE_EXIT)
+				return MLX5_QP_TXCMP_CODE_EXIT;
+			if (wret == MLX5_QP_TXCMP_CODE_ERROR)
+				return MLX5_QP_TXCMP_CODE_ERROR;
 		}
 		if (MLX5_TXOFF_CONFIG(INLINE)) {
 			unsigned int inlen, vlan = 0;
@@ -3085,7 +3118,7 @@ mlx5_qp_tx_burst_single_send(struct mlx5_qp_data *__rte_restrict qp_txq,
 						(loc->mbuf, uint8_t *));
 				/* Check against minimal length. */
 				if (inlen <= MLX5_ESEG_MIN_INLINE_SIZE)
-					return MLX5_TXCMP_CODE_ERROR;
+					return MLX5_QP_TXCMP_CODE_ERROR;
 				if (loc->mbuf->ol_flags &
 				    RTE_MBUF_F_TX_DYNF_NOINLINE) {
 					/*
@@ -3130,7 +3163,7 @@ single_inline:
 				/* Check if there are enough WQEBBs. */
 				wqe_n = (seg_n + 3) / 4;
 				if (wqe_n > loc->wqe_free)
-					return MLX5_TXCMP_CODE_EXIT;
+					return MLX5_QP_TXCMP_CODE_EXIT;
 				wqe = qp_txq->sq_wqes + (qp_txq->sq_wqe_ci & qp_txq->sq_wqe_m);
 				loc->wqe_last = wqe;
 				mlx5_qp_tx_cseg_init(qp_txq, loc, wqe, seg_n,
@@ -3187,7 +3220,7 @@ single_min_inline:
 				      MLX5_WQE_DSEG_SIZE +
 				      MLX5_WSEG_SIZE - 1) / MLX5_WSEG_SIZE;
 				if (loc->wqe_free < ((ds + 3) / 4))
-					return MLX5_TXCMP_CODE_EXIT;
+					return MLX5_QP_TXCMP_CODE_EXIT;
 				/*
 				 * Build the ordinary SEND WQE:
 				 * - Control Segment
@@ -3311,30 +3344,30 @@ single_no_inline:
 		++loc->pkts_sent;
 		--pkts_n;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
-			return MLX5_TXCMP_CODE_EXIT;
+			return MLX5_QP_TXCMP_CODE_EXIT;
 		loc->mbuf = *pkts++;
 		if (pkts_n > 1)
 			rte_prefetch0(*pkts);
 		ret = mlx5_qp_tx_able_to_empw(qp_txq, loc, olx, true);
-		if (unlikely(ret != MLX5_TXCMP_CODE_SINGLE))
+		if (unlikely(ret != MLX5_QP_TXCMP_CODE_SINGLE))
 			return ret;
 	}
 	MLX5_ASSERT(false);
 }
 
-static __rte_always_inline enum mlx5_txcmp_code
+static __rte_always_inline enum MLX5_QP_TXCMP_CODE
 mlx5_qp_tx_burst_single(struct mlx5_qp_data *__rte_restrict qp_txq,
 		     struct rte_mbuf **__rte_restrict pkts,
 		     unsigned int pkts_n,
 		     struct mlx5_qp_txq_local *__rte_restrict loc,
 		     unsigned int olx)
 {
-	enum mlx5_txcmp_code ret;
+	enum MLX5_QP_TXCMP_CODE ret;
 
 	ret = mlx5_qp_tx_able_to_empw(qp_txq, loc, olx, false);
-	if (ret == MLX5_TXCMP_CODE_SINGLE)
+	if (ret == MLX5_QP_TXCMP_CODE_SINGLE)
 		goto ordinary_send;
-	MLX5_ASSERT(ret == MLX5_TXCMP_CODE_EMPW);
+	MLX5_ASSERT(ret == MLX5_QP_TXCMP_CODE_EMPW);
 	for (;;) {
 		/* Optimize for inline/no inline eMPW send. */
 		ret = (MLX5_TXOFF_CONFIG(INLINE)) ?
@@ -3342,14 +3375,14 @@ mlx5_qp_tx_burst_single(struct mlx5_qp_data *__rte_restrict qp_txq,
 				(qp_txq, pkts, pkts_n, loc, olx) :
 			mlx5_qp_tx_burst_empw_simple
 				(qp_txq, pkts, pkts_n, loc, olx);
-		if (ret != MLX5_TXCMP_CODE_SINGLE)
+		if (ret != MLX5_QP_TXCMP_CODE_SINGLE)
 			return ret;
 		/* The resources to send one packet should remain. */
 		MLX5_ASSERT(loc->elts_free && loc->wqe_free);
 ordinary_send:
 		ret = mlx5_qp_tx_burst_single_send(qp_txq, pkts, pkts_n, loc, olx);
-		MLX5_ASSERT(ret != MLX5_TXCMP_CODE_SINGLE);
-		if (ret != MLX5_TXCMP_CODE_EMPW)
+		MLX5_ASSERT(ret != MLX5_QP_TXCMP_CODE_SINGLE);
+		if (ret != MLX5_QP_TXCMP_CODE_EMPW)
 			return ret;
 		/* The resources to send one packet should remain. */
 		MLX5_ASSERT(loc->elts_free && loc->wqe_free);
@@ -3480,7 +3513,7 @@ mlx5_qp_tx_burst_tmpl(struct mlx5_qp_data *__rte_restrict qp_txq,
 		   unsigned int olx)
 {
 	struct mlx5_qp_txq_local loc;
-	enum mlx5_txcmp_code ret;
+	enum MLX5_QP_TXCMP_CODE ret;
 	unsigned int part;
 
 	MLX5_ASSERT(qp_txq->sq_elts_s >= (uint16_t)(qp_txq->sq_elts_head - qp_txq->sq_elts_tail));
@@ -3558,7 +3591,7 @@ enter_send_multi:
 			 * These returned code checks are supposed
 			 * to be optimized out due to routine inlining.
 			 */
-			if (ret == MLX5_TXCMP_CODE_EXIT) {
+			if (ret == MLX5_QP_TXCMP_CODE_EXIT) {
 				/*
 				 * The routine returns this code when
 				 * all packets are sent or there is no
@@ -3566,7 +3599,7 @@ enter_send_multi:
 				 */
 				break;
 			}
-			if (ret == MLX5_TXCMP_CODE_ERROR) {
+			if (ret == MLX5_QP_TXCMP_CODE_ERROR) {
 				/*
 				 * The routine returns this code when some error
 				 * in the incoming packets format occurred.
@@ -3574,7 +3607,7 @@ enter_send_multi:
 				qp_txq->stats.oerrors++;
 				break;
 			}
-			if (ret == MLX5_TXCMP_CODE_SINGLE) {
+			if (ret == MLX5_QP_TXCMP_CODE_SINGLE) {
 				/*
 				 * The single-segment packet was encountered
 				 * in the array, try to send it with the
@@ -3583,7 +3616,7 @@ enter_send_multi:
 				goto enter_send_single;
 			}
 			if (MLX5_TXOFF_CONFIG(TSO) &&
-			    ret == MLX5_TXCMP_CODE_TSO) {
+			    ret == MLX5_QP_TXCMP_CODE_TSO) {
 				/*
 				 * The single-segment TSO packet was
 				 * encountered in the array.
@@ -3612,16 +3645,16 @@ enter_send_tso:
 			 * These returned code checks are supposed
 			 * to be optimized out due to routine inlining.
 			 */
-			if (ret == MLX5_TXCMP_CODE_EXIT)
+			if (ret == MLX5_QP_TXCMP_CODE_EXIT)
 				break;
-			if (ret == MLX5_TXCMP_CODE_ERROR) {
+			if (ret == MLX5_QP_TXCMP_CODE_ERROR) {
 				qp_txq->stats.oerrors++;
 				break;
 			}
-			if (ret == MLX5_TXCMP_CODE_SINGLE)
+			if (ret == MLX5_QP_TXCMP_CODE_SINGLE)
 				goto enter_send_single;
 			if (MLX5_TXOFF_CONFIG(MULTI) &&
-			    ret == MLX5_TXCMP_CODE_MULTI) {
+			    ret == MLX5_QP_TXCMP_CODE_MULTI) {
 				/*
 				 * The multi-segment packet was
 				 * encountered in the array.
@@ -3648,14 +3681,14 @@ enter_send_single:
 		 * These returned code checks are supposed
 		 * to be optimized out due to routine inlining.
 		 */
-		if (ret == MLX5_TXCMP_CODE_EXIT)
+		if (ret == MLX5_QP_TXCMP_CODE_EXIT)
 			break;
-		if (ret == MLX5_TXCMP_CODE_ERROR) {
+		if (ret == MLX5_QP_TXCMP_CODE_ERROR) {
 			qp_txq->stats.oerrors++;
 			break;
 		}
 		if (MLX5_TXOFF_CONFIG(MULTI) &&
-		    ret == MLX5_TXCMP_CODE_MULTI) {
+		    ret == MLX5_QP_TXCMP_CODE_MULTI) {
 			/*
 			 * The multi-segment packet was
 			 * encountered in the array.
@@ -3663,7 +3696,7 @@ enter_send_single:
 			goto enter_send_multi;
 		}
 		if (MLX5_TXOFF_CONFIG(TSO) &&
-		    ret == MLX5_TXCMP_CODE_TSO) {
+		    ret == MLX5_QP_TXCMP_CODE_TSO) {
 			/*
 			 * The single-segment TSO packet was
 			 * encountered in the array.
@@ -3755,7 +3788,7 @@ burst_exit:
 		__mlx5_qp_tx_free_mbuf(qp_txq, pkts, loc.mbuf_free, olx);
 	/* Trace productive bursts only. */
 	if (__rte_trace_point_fp_is_enabled() && loc.pkts_sent)
-		rte_pmd_mlx5_trace_tx_exit(mlx5_read_pcibar_clock_from_qp_txq(qp_txq),
+		rte_pmd_mlx5_trace_tx_exit(mlx5_qp_read_pcibar_clock_from_qp_txq(qp_txq),
 					   loc.pkts_sent, pkts_n);
 	return loc.pkts_sent;
 }

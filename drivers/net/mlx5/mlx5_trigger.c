@@ -85,6 +85,19 @@ mlx5_qp_start(struct rte_eth_dev *dev)
 			qp_ctrl->obj = NULL;
 			goto error;
 		}
+		size_t size = qp_data->sq_cqe_s * sizeof(*qp_data->fcqs);
+
+		qp_data->fcqs = mlx5_malloc_numa_tolerant(flags, size,
+					     RTE_CACHE_LINE_SIZE,
+					     qp_ctrl->socket);
+		if (!qp_data->fcqs) {
+			DRV_LOG(ERR, "Port %u Tx queue %u cannot "
+				   "allocate memory (FCQ).",
+				   dev->data->port_id, i);
+			rte_errno = ENOMEM;
+			goto error;
+		}
+
 		DRV_LOG(DEBUG, "Port %u qp %u updated with %p.",
 					  dev->data->port_id, i, (void *)&qp_ctrl->obj);
 		LIST_INSERT_HEAD(&priv->qpsobj, qp_ctrl->obj, next);
@@ -1576,7 +1589,8 @@ continue_dev_start:
 	if (mlx5_flow_is_steering_disabled())
 		mlx5_flow_rxq_mark_flag_set(dev);
 	rte_wmb();
-	dev->tx_pkt_burst = mlx5_select_tx_function(dev);
+	//dev->tx_pkt_burst = mlx5_select_tx_function(dev);
+	dev->tx_pkt_burst = mlx5_qp_tx_burst_none_empw;
 	dev->rx_pkt_burst = mlx5_select_rx_function(dev);
 	/* Enable datapath on secondary process. */
 	mlx5_mp_os_req_start_rxtx(dev);

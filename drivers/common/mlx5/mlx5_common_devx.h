@@ -42,11 +42,12 @@ struct mlx5_devx_qp {
 	struct mlx5_devx_obj *qp; /* The QP DevX object. */
 	void *umem_obj; /* The QP umem object. */
 	union {
-		void *umem_buf;
-		struct mlx5_wqe *wqes; /* The QP ring buffer. */
-		struct mlx5_aso_wqe *aso_wqes;
+		volatile void *umem_buf;
+		volatile struct mlx5_wqe *wqes; /* The QP ring buffer. */
+		volatile struct mlx5_aso_wqe *aso_wqes;
 	};
 	volatile uint32_t *db_rec; /* The QP doorbell record. */
+	bool consec; /* Using consecutive memory. */
 };
 
 /* DevX Receive Queue resource structure. */
