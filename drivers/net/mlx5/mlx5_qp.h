@@ -239,13 +239,13 @@ static __rte_always_inline uint64_t mlx5_read_pcibar_clock(struct rte_eth_dev *d
 	return 0;
 }
 
-static __rte_always_inline uint64_t mlx5_read_pcibar_clock_from_qp_txq(struct mlx5_qp_data *qp_txq)
-{
-	struct mlx5_qp_ctrl *qp_txq_ctrl = container_of(qp_txq, struct mlx5_qp_ctrl, qp);
-	struct rte_eth_dev *dev = ETH_DEV(qp_txq_ctrl->priv);
 
-	return mlx5_read_pcibar_clock(dev);
+static __rte_always_inline struct mlx5_uar_data *
+mlx5_qp_tx_bfreg(struct mlx5_qp_data *qp_txq)
+{
+	return &MLX5_PROC_PRIV(qp_txq->port_id)->uar_table[qp_txq->qp_idx];
 }
+
 
 /**
  * Free the mbufs from the linear array of pointers.
@@ -364,6 +364,29 @@ mlx5_qp_tx_free_mbuf(struct mlx5_qp_data *__rte_restrict qp_txq,
 		}
 	}
 }
+
+/**
+ * No inline version to free buffers for optimal call
+ * on the tx_burst completion.
+ */
+static __rte_noinline void
+__mlx5_qp_tx_free_mbuf(struct mlx5_qp_data *__rte_restrict qp_txq,
+		    struct rte_mbuf **__rte_restrict pkts,
+		    unsigned int pkts_n,
+		    unsigned int olx __rte_unused)
+{
+	mlx5_qp_tx_free_mbuf(qp_txq, pkts, pkts_n, olx);
+}
+
+
+static __rte_always_inline uint64_t mlx5_read_pcibar_clock_from_qp_txq(struct mlx5_qp_data *qp_txq)
+{
+	struct mlx5_qp_ctrl *qp_txq_ctrl = container_of(qp_txq, struct mlx5_qp_ctrl, qp);
+	struct rte_eth_dev *dev = ETH_DEV(qp_txq_ctrl->priv);
+
+	return mlx5_read_pcibar_clock(dev);
+}
+
 
 /**
  * Free the mbuf from the elts ring buffer till new tail.
@@ -1012,6 +1035,38 @@ mlx5_qp_tx_schedule_send(struct mlx5_qp_data *restrict qp_txq,
 	return MLX5_TXCMP_CODE_SINGLE;
 }
 
+
+/**
+ * Build the Data Segment of pointer type.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param dseg
+ *   Pointer to WQE to fill with built Data Segment.
+ * @param buf
+ *   Data buffer to point.
+ * @param len
+ *   Data buffer length.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ */
+static __rte_always_inline void
+mlx5_qp_tx_dseg_ptr(struct mlx5_qp_data *__rte_restrict qp_txq,
+		 struct mlx5_qp_txq_local *__rte_restrict loc,
+		 struct mlx5_wqe_dseg *__rte_restrict dseg,
+		 uint8_t *buf,
+		 unsigned int len,
+		 unsigned int olx __rte_unused)
+
+{
+	MLX5_ASSERT(len);
+	dseg->bcount = rte_cpu_to_be_32(len);
+	dseg->lkey = mlx5_mr_mb2mr(&qp_txq->mr_ctrl, loc->mbuf);
+	dseg->pbuf = rte_cpu_to_be_64((uintptr_t)buf);
+}
 
 /**
  * Build the Data Segment of pointer type or inline if data length is less than
@@ -1749,6 +1804,124 @@ mlx5_qp_tx_burst_mseg(struct mlx5_qp_data *__rte_restrict qp_txq,
 
 
 /**
+ * Build the Ethernet Segment with entire packet data inlining. Checks the
+ * boundary of WQEBB and ring buffer wrapping, supports Software Parser,
+ * Checksums and VLAN insertion Tx offload features.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param wqe
+ *   Pointer to WQE to fill with built Ethernet Segment.
+ * @param vlan
+ *   Length of VLAN tag insertion if any.
+ * @param inlen
+ *   Length of data to inline (VLAN included, if any).
+ * @param tso
+ *   TSO flag, set mss field from the packet.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ *
+ * @return
+ *   Pointer to the next Data Segment (aligned and wrapped around).
+ */
+static __rte_always_inline struct mlx5_wqe_dseg *
+mlx5_qp_tx_eseg_data(struct mlx5_qp_data *__rte_restrict qp_txq,
+		  struct mlx5_qp_txq_local *__rte_restrict loc,
+		  struct mlx5_wqe *__rte_restrict wqe,
+		  unsigned int vlan,
+		  unsigned int inlen,
+		  unsigned int tso,
+		  unsigned int olx)
+{
+	struct mlx5_wqe_eseg *__rte_restrict es = &wqe->eseg;
+	uint32_t csum;
+	uint8_t *psrc, *pdst;
+	unsigned int part;
+
+	/*
+	 * Calculate and set check sum flags first, dword field
+	 * in segment may be shared with Software Parser flags.
+	 */
+	csum = MLX5_TXOFF_CONFIG(CSUM) ? qp_txq_ol_cksum_to_cs(loc->mbuf) : 0;
+	if (tso) {
+		csum <<= 24;
+		csum |= loc->mbuf->tso_segsz;
+		es->flags = rte_cpu_to_be_32(csum);
+	} else {
+		es->flags = rte_cpu_to_le_32(csum);
+	}
+	/*
+	 * Calculate and set Software Parser offsets and flags.
+	 * These flags a set for custom UDP and IP tunnel packets.
+	 */
+	es->swp_offs = qp_txq_mbuf_to_swp(loc, &es->swp_flags, olx);
+	/* Fill metadata field if needed. */
+	es->metadata = MLX5_TXOFF_CONFIG(METADATA) ?
+		       loc->mbuf->ol_flags & RTE_MBUF_DYNFLAG_TX_METADATA ?
+		       rte_cpu_to_be_32(*RTE_FLOW_DYNF_METADATA(loc->mbuf)) :
+		       0 : 0;
+	psrc = rte_pktmbuf_mtod(loc->mbuf, uint8_t *);
+	es->inline_hdr_sz = rte_cpu_to_be_16(inlen);
+	es->inline_data = *(unaligned_uint16_t *)psrc;
+	psrc +=	sizeof(uint16_t);
+	pdst = (uint8_t *)(es + 1);
+	if (MLX5_TXOFF_CONFIG(VLAN) && vlan) {
+		/* Implement VLAN tag insertion as part inline data. */
+		memcpy(pdst, psrc, 2 * RTE_ETHER_ADDR_LEN - sizeof(uint16_t));
+		pdst += 2 * RTE_ETHER_ADDR_LEN - sizeof(uint16_t);
+		psrc +=	2 * RTE_ETHER_ADDR_LEN - sizeof(uint16_t);
+		/* Insert VLAN ethertype + VLAN tag. */
+		*(unaligned_uint32_t *)pdst = rte_cpu_to_be_32
+						((RTE_ETHER_TYPE_VLAN << 16) |
+						 loc->mbuf->vlan_tci);
+		pdst += sizeof(struct rte_vlan_hdr);
+		/* Copy the rest two bytes from packet data. */
+		MLX5_ASSERT(pdst == RTE_PTR_ALIGN(pdst, sizeof(uint16_t)));
+		*(uint16_t *)pdst = *(unaligned_uint16_t *)psrc;
+		psrc += sizeof(uint16_t);
+	} else {
+		/* Fill the gap in the title WQEBB with inline data. */
+		rte_mov16(pdst, psrc);
+		psrc += MLX5_SIZE_MOV16;
+	}
+	pdst = (uint8_t *)(es + 2);
+	MLX5_ASSERT(inlen >= MLX5_ESEG_MIN_INLINE_SIZE);
+	MLX5_ASSERT(pdst < (uint8_t *)qp_txq->sq_wqes_end);
+	inlen -= MLX5_ESEG_MIN_INLINE_SIZE;
+	if (!inlen) {
+		MLX5_ASSERT(pdst == RTE_PTR_ALIGN(pdst, MLX5_WSEG_SIZE));
+		return (struct mlx5_wqe_dseg *)pdst;
+	}
+	/*
+	 * The WQEBB space availability is checked by caller.
+	 * Here we should be aware of WQE ring buffer wraparound only.
+	 */
+	part = (uint8_t *)qp_txq->sq_wqes_end - pdst;
+	part = RTE_MIN(part, inlen);
+	do {
+		rte_memcpy(pdst, psrc, part);
+		inlen -= part;
+		if (likely(!inlen)) {
+			/*
+			 * If return value is not used by the caller
+			 * the code below will be optimized out.
+			 */
+			pdst += part;
+			pdst = RTE_PTR_ALIGN(pdst, MLX5_WSEG_SIZE);
+			if (unlikely(pdst >= (uint8_t *)qp_txq->sq_wqes_end))
+				pdst = (uint8_t *)qp_txq->sq_wqes;
+			return (struct mlx5_wqe_dseg *)pdst;
+		}
+		pdst = (uint8_t *)qp_txq->sq_wqes;
+		psrc += part;
+		part = inlen;
+	} while (true);
+}
+
+/**
  * Tx burst function for single-segment packets with TSO.
  * Supports all types of Tx offloads, except multi-packets.
  * Uses MLX5_OPCODE_TSO to build WQEs, sends one packet per WQE.
@@ -1890,6 +2063,1395 @@ mlx5_qp_tx_burst_tso(struct mlx5_qp_data *__rte_restrict qp_txq,
 		/* Continue with the next TSO packet. */
 	}
 	MLX5_ASSERT(false);
+}
+
+
+
+
+/**
+ * Analyze the packet and select the best method to send.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ * @param newp
+ *   The predefined flag whether do complete check for
+ *   multi-segment packets and TSO.
+ *
+ * @return
+ *  MLX5_TXCMP_CODE_MULTI - multi-segment packet encountered.
+ *  MLX5_TXCMP_CODE_TSO - TSO required, use TSO/LSO.
+ *  MLX5_TXCMP_CODE_SINGLE - single-segment packet, use SEND.
+ *  MLX5_TXCMP_CODE_EMPW - single-segment packet, use MPW.
+ */
+static __rte_always_inline enum mlx5_txcmp_code
+mlx5_qp_tx_able_to_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
+		     struct mlx5_qp_txq_local *__rte_restrict loc,
+		     unsigned int olx,
+		     bool newp)
+{
+	/* Check for multi-segment packet. */
+	if (newp &&
+	    MLX5_TXOFF_CONFIG(MULTI) &&
+	    unlikely(NB_SEGS(loc->mbuf) > 1))
+		return MLX5_TXCMP_CODE_MULTI;
+	/* Check for TSO packet. */
+	if (newp &&
+	    MLX5_TXOFF_CONFIG(TSO) &&
+	    unlikely(loc->mbuf->ol_flags & RTE_MBUF_F_TX_TCP_SEG))
+		return MLX5_TXCMP_CODE_TSO;
+	/* Check if eMPW is enabled at all. */
+	if (!MLX5_TXOFF_CONFIG(EMPW))
+		return MLX5_TXCMP_CODE_SINGLE;
+	/* Check if eMPW can be engaged. */
+	if (MLX5_TXOFF_CONFIG(VLAN) &&
+	    unlikely(loc->mbuf->ol_flags & RTE_MBUF_F_TX_VLAN) &&
+		(!MLX5_TXOFF_CONFIG(INLINE) ||
+		 unlikely((rte_pktmbuf_data_len(loc->mbuf) +
+			   sizeof(struct rte_vlan_hdr)) > qp_txq->inlen_empw))) {
+		/*
+		 * eMPW does not support VLAN insertion offload, we have to
+		 * inline the entire packet but packet is too long for inlining.
+		 */
+		return MLX5_TXCMP_CODE_SINGLE;
+	}
+	return MLX5_TXCMP_CODE_EMPW;
+}
+
+
+/**
+ * Update send loop variables and WQE for eMPW loop with data inlining.
+ * Gets the size of pushed descriptors and data to the WQE.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param len
+ *   Total size of descriptor/data in bytes.
+ * @param slen
+ *   Accumulated statistics, data bytes sent.
+ * @param wqem
+ *   The base WQE for the eMPW/MPW descriptor.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ *
+ * @return
+ *  true - packet match with eMPW batch attributes.
+ *  false - no match, eMPW should be restarted.
+ */
+static __rte_always_inline void
+mlx5_qp_tx_idone_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
+		   struct mlx5_qp_txq_local *__rte_restrict loc,
+		   unsigned int len,
+		   unsigned int slen,
+		   struct mlx5_wqe *__rte_restrict wqem,
+		   unsigned int olx __rte_unused)
+{
+	struct mlx5_wqe_dseg *dseg = &wqem->dseg[0];
+
+	MLX5_ASSERT(MLX5_TXOFF_CONFIG(INLINE));
+#ifdef MLX5_PMD_SOFT_COUNTERS
+	/* Update sent data bytes counter. */
+	 qp_txq->stats.obytes += slen;
+#else
+	(void)slen;
+#endif
+	if (MLX5_TXOFF_CONFIG(MPW) && dseg->bcount == RTE_BE32(0)) {
+		/*
+		 * If the legacy MPW session contains the inline packets
+		 * we should set the only inline data segment length
+		 * and align the total length to the segment size.
+		 */
+		MLX5_ASSERT(len > sizeof(dseg->bcount));
+		dseg->bcount = rte_cpu_to_be_32((len - sizeof(dseg->bcount)) |
+						MLX5_ETH_WQE_DATA_INLINE);
+		len = (len + MLX5_WSEG_SIZE - 1) / MLX5_WSEG_SIZE + 2;
+	} else {
+		/*
+		 * The session is not legacy MPW or contains the
+		 * data buffer pointer segments.
+		 */
+		MLX5_ASSERT((len % MLX5_WSEG_SIZE) == 0);
+		len = len / MLX5_WSEG_SIZE + 2;
+	}
+	wqem->cseg.sq_ds = rte_cpu_to_be_32(qp_txq->qp_num_8s | len);
+	qp_txq->sq_wqe_ci += (len + 3) / 4;
+	loc->wqe_free -= (len + 3) / 4;
+	loc->wqe_last = wqem;
+}
+
+
+/**
+ * Build the Data Segment of inlined data from single
+ * segment packet with VLAN insertion.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param dseg
+ *   Pointer to the dseg fill with built Data Segment.
+ * @param buf
+ *   Data buffer to point.
+ * @param len
+ *   Data buffer length.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ *
+ * @return
+ *   Pointer to the next Data Segment after inlined data.
+ *   Ring buffer wraparound check is needed.
+ */
+static __rte_always_inline struct mlx5_wqe_dseg *
+mlx5_qp_tx_dseg_vlan(struct mlx5_qp_data *__rte_restrict qp_txq,
+		  struct mlx5_qp_txq_local *__rte_restrict loc __rte_unused,
+		  struct mlx5_wqe_dseg *__rte_restrict dseg,
+		  uint8_t *buf,
+		  unsigned int len,
+		  unsigned int olx __rte_unused)
+
+{
+	unsigned int part;
+	uint8_t *pdst;
+
+	MLX5_ASSERT(len > MLX5_ESEG_MIN_INLINE_SIZE);
+	if (!MLX5_TXOFF_CONFIG(MPW)) {
+		/* Store the descriptor byte counter for eMPW sessions. */
+		dseg->bcount = rte_cpu_to_be_32
+				((len + sizeof(struct rte_vlan_hdr)) |
+				 MLX5_ETH_WQE_DATA_INLINE);
+		pdst = &dseg->inline_data[0];
+	} else {
+		/* The entire legacy MPW session counter is stored on close. */
+		pdst = (uint8_t *)dseg;
+	}
+	memcpy(pdst, buf, MLX5_DSEG_MIN_INLINE_SIZE);
+	buf += MLX5_DSEG_MIN_INLINE_SIZE;
+	pdst += MLX5_DSEG_MIN_INLINE_SIZE;
+	len -= MLX5_DSEG_MIN_INLINE_SIZE;
+	/* Insert VLAN ethertype + VLAN tag. Pointer is aligned. */
+	MLX5_ASSERT(pdst == RTE_PTR_ALIGN(pdst, MLX5_WSEG_SIZE));
+	if (unlikely(pdst >= (uint8_t *)qp_txq->sq_wqes_end))
+		pdst = (uint8_t *)qp_txq->sq_wqes;
+	*(uint32_t *)pdst = rte_cpu_to_be_32((RTE_ETHER_TYPE_VLAN << 16) |
+					      loc->mbuf->vlan_tci);
+	pdst += sizeof(struct rte_vlan_hdr);
+	/*
+	 * The WQEBB space availability is checked by caller.
+	 * Here we should be aware of WQE ring buffer wraparound only.
+	 */
+	part = (uint8_t *)qp_txq->sq_wqes_end - pdst;
+	part = RTE_MIN(part, len);
+	do {
+		rte_memcpy(pdst, buf, part);
+		len -= part;
+		if (likely(!len)) {
+			pdst += part;
+			if (!MLX5_TXOFF_CONFIG(MPW))
+				pdst = RTE_PTR_ALIGN(pdst, MLX5_WSEG_SIZE);
+			/* Note: no final wraparound check here. */
+			return (struct mlx5_wqe_dseg *)pdst;
+		}
+		pdst = (uint8_t *)qp_txq->sq_wqes;
+		buf += part;
+		part = len;
+	} while (true);
+}
+
+
+/**
+ * Build the Data Segment of inlined data from single
+ * segment packet, no VLAN insertion.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param dseg
+ *   Pointer to WQE to fill with built Data Segment.
+ * @param buf
+ *   Data buffer to point.
+ * @param len
+ *   Data buffer length.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ *
+ * @return
+ *   Pointer to the next Data Segment after inlined data.
+ *   Ring buffer wraparound check is needed. We do not do it here because it
+ *   may not be needed for the last packet in the eMPW session.
+ */
+static __rte_always_inline struct mlx5_wqe_dseg *
+mlx5_qp_tx_dseg_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
+		  struct mlx5_qp_txq_local *__rte_restrict loc __rte_unused,
+		  struct mlx5_wqe_dseg *__rte_restrict dseg,
+		  uint8_t *buf,
+		  unsigned int len,
+		  unsigned int olx __rte_unused)
+{
+	unsigned int part;
+	uint8_t *pdst;
+
+	if (!MLX5_TXOFF_CONFIG(MPW)) {
+		/* Store the descriptor byte counter for eMPW sessions. */
+		dseg->bcount = rte_cpu_to_be_32(len | MLX5_ETH_WQE_DATA_INLINE);
+		pdst = &dseg->inline_data[0];
+	} else {
+		/* The entire legacy MPW session counter is stored on close. */
+		pdst = (uint8_t *)dseg;
+	}
+	/*
+	 * The WQEBB space availability is checked by caller.
+	 * Here we should be aware of WQE ring buffer wraparound only.
+	 */
+	part = (uint8_t *)qp_txq->sq_wqes_end - pdst;
+	part = RTE_MIN(part, len);
+	do {
+		rte_memcpy(pdst, buf, part);
+		len -= part;
+		if (likely(!len)) {
+			pdst += part;
+			if (!MLX5_TXOFF_CONFIG(MPW))
+				pdst = RTE_PTR_ALIGN(pdst, MLX5_WSEG_SIZE);
+			/* Note: no final wraparound check here. */
+			return (struct mlx5_wqe_dseg *)pdst;
+		}
+		pdst = (uint8_t *)qp_txq->sq_wqes;
+		buf += part;
+		part = len;
+	} while (true);
+}
+
+
+/**
+ * Check the next packet attributes to match with the eMPW batch ones.
+ * In addition, for legacy MPW the packet length is checked either.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param es
+ *   Pointer to Ethernet Segment of eMPW batch.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param dlen
+ *   Length of previous packet in MPW descriptor.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ *
+ * @return
+ *  true - packet match with eMPW batch attributes.
+ *  false - no match, eMPW should be restarted.
+ */
+static __rte_always_inline bool
+mlx5_qp_tx_match_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
+		   struct mlx5_wqe_eseg *__rte_restrict es,
+		   struct mlx5_qp_txq_local *__rte_restrict loc,
+		   uint32_t dlen,
+		   unsigned int olx)
+{
+	uint8_t swp_flags = 0;
+
+	/* Compare the checksum flags, if any. */
+	if (MLX5_TXOFF_CONFIG(CSUM) &&
+	    qp_txq_ol_cksum_to_cs(loc->mbuf) != es->cs_flags)
+		return false;
+	/* Compare the Software Parser offsets and flags. */
+	if (MLX5_TXOFF_CONFIG(SWP) &&
+	    (es->swp_offs != qp_txq_mbuf_to_swp(loc, &swp_flags, olx) ||
+	     es->swp_flags != swp_flags))
+		return false;
+	/* Fill metadata field if needed. */
+	if (MLX5_TXOFF_CONFIG(METADATA) &&
+		es->metadata != (loc->mbuf->ol_flags & RTE_MBUF_DYNFLAG_TX_METADATA ?
+				 rte_cpu_to_be_32(*RTE_FLOW_DYNF_METADATA(loc->mbuf)) : 0))
+		return false;
+	/* Legacy MPW can send packets with the same length only. */
+	if (MLX5_TXOFF_CONFIG(MPW) &&
+	    dlen != rte_pktmbuf_data_len(loc->mbuf))
+		return false;
+	/* There must be no VLAN packets in eMPW loop. */
+	if (MLX5_TXOFF_CONFIG(VLAN))
+		MLX5_ASSERT(!(loc->mbuf->ol_flags & RTE_MBUF_F_TX_VLAN));
+	/* Check if the scheduling is requested. */
+	if (MLX5_TXOFF_CONFIG(TXPP) &&
+	    loc->mbuf->ol_flags & qp_txq->ts_mask)
+		return false;
+	return true;
+}
+
+/**
+ * The routine sends packets with MLX5_OPCODE_EMPW
+ * with inlining, optionally supports VLAN insertion.
+ */
+static __rte_always_inline enum mlx5_txcmp_code
+mlx5_qp_tx_burst_empw_inline(struct mlx5_qp_data *__rte_restrict qp_txq,
+			  struct rte_mbuf **__rte_restrict pkts,
+			  unsigned int pkts_n,
+			  struct mlx5_qp_txq_local *__rte_restrict loc,
+			  unsigned int olx)
+{
+	/*
+	 * Subroutine is the part of mlx5_tx_burst_single() and sends
+	 * single-segment packet with eMPW opcode with data inlining.
+	 */
+	MLX5_ASSERT(MLX5_TXOFF_CONFIG(INLINE));
+	MLX5_ASSERT(MLX5_TXOFF_CONFIG(EMPW));
+	MLX5_ASSERT(loc->elts_free && loc->wqe_free);
+	MLX5_ASSERT(pkts_n > loc->pkts_sent);
+	pkts += loc->pkts_sent + 1;
+	pkts_n -= loc->pkts_sent;
+	for (;;) {
+		struct mlx5_wqe_dseg *__rte_restrict dseg;
+		struct mlx5_wqe *__rte_restrict wqem;
+		enum mlx5_txcmp_code ret;
+		unsigned int room, part, nlim;
+		unsigned int slen = 0;
+
+		MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
+		/*
+		 * Limits the amount of packets in one WQE
+		 * to improve CQE latency generation.
+		 */
+		nlim = RTE_MIN(pkts_n, MLX5_TXOFF_CONFIG(MPW) ?
+				       MLX5_MPW_INLINE_MAX_PACKETS :
+				       MLX5_EMPW_MAX_PACKETS);
+		if (MLX5_TXOFF_CONFIG(TXPP)) {
+			enum mlx5_txcmp_code wret;
+
+			/* Generate WAIT for scheduling if requested. */
+			wret = mlx5_qp_tx_schedule_send(qp_txq, loc, nlim, olx);
+			if (wret == MLX5_TXCMP_CODE_EXIT)
+				return MLX5_TXCMP_CODE_EXIT;
+			if (wret == MLX5_TXCMP_CODE_ERROR)
+				return MLX5_TXCMP_CODE_ERROR;
+		}
+		/* Check whether we have minimal amount WQEs */
+		if (unlikely(loc->wqe_free <
+			    ((2 + MLX5_EMPW_MIN_PACKETS + 3) / 4)))
+			return MLX5_TXCMP_CODE_EXIT;
+		if (likely(pkts_n > 1))
+			rte_prefetch0(*pkts);
+		wqem = qp_txq->sq_wqes + (qp_txq->sq_wqe_ci & qp_txq->sq_wqe_m);
+		/*
+		 * Build eMPW title WQEBB:
+		 * - Control Segment, eMPW opcode, zero DS
+		 * - Ethernet Segment, no inline
+		 */
+		mlx5_qp_tx_cseg_init(qp_txq, loc, wqem, 0,
+				  MLX5_OPCODE_ENHANCED_MPSW, olx);
+		mlx5_qp_tx_eseg_none(qp_txq, loc, wqem,
+				  olx & ~MLX5_TXOFF_CONFIG_VLAN);
+		dseg = &wqem->dseg[0];
+		/* Store the packet length for legacy MPW. */
+		if (MLX5_TXOFF_CONFIG(MPW))
+			wqem->eseg.mss = rte_cpu_to_be_16
+					 (rte_pktmbuf_data_len(loc->mbuf));
+		room = RTE_MIN(MLX5_WQE_SIZE_MAX / MLX5_WQE_SIZE,
+			       loc->wqe_free) * MLX5_WQE_SIZE -
+					MLX5_WQE_CSEG_SIZE -
+					MLX5_WQE_ESEG_SIZE;
+		/* Limit the room for legacy MPW sessions for performance. */
+		if (MLX5_TXOFF_CONFIG(MPW))
+			room = RTE_MIN(room,
+				       RTE_MAX(qp_txq->inlen_empw +
+					       sizeof(dseg->bcount) +
+					       (MLX5_TXOFF_CONFIG(VLAN) ?
+					       sizeof(struct rte_vlan_hdr) : 0),
+					       MLX5_MPW_INLINE_MAX_PACKETS *
+					       MLX5_WQE_DSEG_SIZE));
+		/* Build WQE till we have space, packets and resources. */
+		part = room;
+		for (;;) {
+			uint32_t dlen = rte_pktmbuf_data_len(loc->mbuf);
+			uint8_t *dptr = rte_pktmbuf_mtod(loc->mbuf, uint8_t *);
+			unsigned int tlen;
+
+			MLX5_ASSERT(room >= MLX5_WQE_DSEG_SIZE);
+			MLX5_ASSERT((room % MLX5_WQE_DSEG_SIZE) == 0);
+			MLX5_ASSERT((uintptr_t)dseg < (uintptr_t)qp_txq->sq_wqes_end);
+			/*
+			 * Some Tx offloads may cause an error if packet is not
+			 * long enough, check against assumed minimal length.
+			 */
+			if (unlikely(dlen <= MLX5_ESEG_MIN_INLINE_SIZE)) {
+				part -= room;
+				if (unlikely(!part))
+					return MLX5_TXCMP_CODE_ERROR;
+				/*
+				 * We have some successfully built
+				 * packet Data Segments to send.
+				 */
+				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
+						   slen, wqem, olx);
+				return MLX5_TXCMP_CODE_ERROR;
+			}
+			/* Inline or not inline - that's the Question. */
+			if (dlen > qp_txq->inlen_empw ||
+			    loc->mbuf->ol_flags & RTE_MBUF_F_TX_DYNF_NOINLINE)
+				goto pointer_empw;
+			if (MLX5_TXOFF_CONFIG(MPW)) {
+				if (dlen > qp_txq->inlen_send)
+					goto pointer_empw;
+				tlen = dlen;
+				if (part == room) {
+					/* Open new inline MPW session. */
+					tlen += sizeof(dseg->bcount);
+					dseg->bcount = RTE_BE32(0);
+					dseg = RTE_PTR_ADD
+						(dseg, sizeof(dseg->bcount));
+				} else {
+					/*
+					 * No pointer and inline descriptor
+					 * intermix for legacy MPW sessions.
+					 */
+					if (wqem->dseg[0].bcount)
+						break;
+				}
+			} else {
+				tlen = sizeof(dseg->bcount) + dlen;
+			}
+			/* Inline entire packet, optional VLAN insertion. */
+			if (MLX5_TXOFF_CONFIG(VLAN) &&
+			    loc->mbuf->ol_flags & RTE_MBUF_F_TX_VLAN) {
+				/*
+				 * The packet length must be checked in
+				 * mlx5_tx_able_to_empw() and packet
+				 * fits into inline length guaranteed.
+				 */
+				MLX5_ASSERT((dlen +
+					     sizeof(struct rte_vlan_hdr)) <=
+					    qp_txq->inlen_empw);
+				tlen += sizeof(struct rte_vlan_hdr);
+				if (room < tlen)
+					break;
+				rte_pmd_mlx5_trace_tx_push(loc->mbuf, qp_txq->sq_wqe_ci);
+				dseg = mlx5_qp_tx_dseg_vlan(qp_txq, loc, dseg,
+							 dptr, dlen, olx);
+#ifdef MLX5_PMD_SOFT_COUNTERS
+				/* Update sent data bytes counter. */
+				slen +=	sizeof(struct rte_vlan_hdr);
+#endif
+			} else {
+				if (room < tlen)
+					break;
+				rte_pmd_mlx5_trace_tx_push(loc->mbuf, qp_txq->sq_wqe_ci);
+				dseg = mlx5_qp_tx_dseg_empw(qp_txq, loc, dseg,
+							 dptr, dlen, olx);
+			}
+			if (!MLX5_TXOFF_CONFIG(MPW))
+				tlen = RTE_ALIGN(tlen, MLX5_WSEG_SIZE);
+			MLX5_ASSERT(room >= tlen);
+			room -= tlen;
+			/*
+			 * Packet data are completely inline,
+			 * we can try to free the packet.
+			 */
+			if (likely(loc->pkts_sent == loc->mbuf_free)) {
+				/*
+				 * All the packets from the burst beginning
+				 * are inline, we can free mbufs directly
+				 * from the origin array on tx_burst exit().
+				 */
+				loc->mbuf_free++;
+				goto next_mbuf;
+			}
+			/*
+			 * In order no to call rte_pktmbuf_free_seg() here,
+			 * in the most inner loop (that might be very
+			 * expensive) we just save the mbuf in elts.
+			 */
+			qp_txq->sq_elts[qp_txq->sq_elts_head++ & qp_txq->sq_elts_m] = loc->mbuf;
+			loc->elts_free--;
+			goto next_mbuf;
+pointer_empw:
+			/*
+			 * No pointer and inline descriptor
+			 * intermix for legacy MPW sessions.
+			 */
+			if (MLX5_TXOFF_CONFIG(MPW) &&
+			    part != room &&
+			    wqem->dseg[0].bcount == RTE_BE32(0))
+				break;
+			/*
+			 * Not inlinable VLAN packets are
+			 * proceeded outside of this routine.
+			 */
+			MLX5_ASSERT(room >= MLX5_WQE_DSEG_SIZE);
+			if (MLX5_TXOFF_CONFIG(VLAN))
+				MLX5_ASSERT(!(loc->mbuf->ol_flags &
+					    RTE_MBUF_F_TX_VLAN));
+			rte_pmd_mlx5_trace_tx_push(loc->mbuf, qp_txq->sq_wqe_ci);
+			mlx5_qp_tx_dseg_ptr(qp_txq, loc, dseg, dptr, dlen, olx);
+			/* We have to store mbuf in elts.*/
+			qp_txq->sq_elts[qp_txq->sq_elts_head++ & qp_txq->sq_elts_m] = loc->mbuf;
+			loc->elts_free--;
+			room -= MLX5_WQE_DSEG_SIZE;
+			/* Ring buffer wraparound is checked at the loop end.*/
+			++dseg;
+next_mbuf:
+#ifdef MLX5_PMD_SOFT_COUNTERS
+			/* Update sent data bytes counter. */
+			slen += dlen;
+#endif
+			loc->pkts_sent++;
+			pkts_n--;
+			if (unlikely(!pkts_n || !loc->elts_free)) {
+				/*
+				 * We have no resources/packets to
+				 * continue build descriptors.
+				 */
+				part -= room;
+				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
+						   slen, wqem, olx);
+				return MLX5_TXCMP_CODE_EXIT;
+			}
+			loc->mbuf = *pkts++;
+			if (likely(pkts_n > 1))
+				rte_prefetch0(*pkts);
+			ret = mlx5_qp_tx_able_to_empw(qp_txq, loc, olx, true);
+			/*
+			 * Unroll the completion code to avoid
+			 * returning variable value - it results in
+			 * unoptimized sequent checking in caller.
+			 */
+			if (ret == MLX5_TXCMP_CODE_MULTI) {
+				part -= room;
+				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
+						   slen, wqem, olx);
+				if (unlikely(!loc->elts_free ||
+					     !loc->wqe_free))
+					return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_TXCMP_CODE_MULTI;
+			}
+			MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
+			if (ret == MLX5_TXCMP_CODE_TSO) {
+				part -= room;
+				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
+						   slen, wqem, olx);
+				if (unlikely(!loc->elts_free ||
+					     !loc->wqe_free))
+					return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_TXCMP_CODE_TSO;
+			}
+			if (ret == MLX5_TXCMP_CODE_SINGLE) {
+				part -= room;
+				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
+						   slen, wqem, olx);
+				if (unlikely(!loc->elts_free ||
+					     !loc->wqe_free))
+					return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_TXCMP_CODE_SINGLE;
+			}
+			if (ret != MLX5_TXCMP_CODE_EMPW) {
+				MLX5_ASSERT(false);
+				part -= room;
+				mlx5_qp_tx_idone_empw(qp_txq, loc, part,
+						   slen, wqem, olx);
+				return MLX5_TXCMP_CODE_ERROR;
+			}
+			/* Check if we have minimal room left. */
+			nlim--;
+			if (unlikely(!nlim || room < MLX5_WQE_DSEG_SIZE))
+				break;
+			/*
+			 * Check whether packet parameters coincide
+			 * within assumed eMPW batch:
+			 * - check sum settings
+			 * - metadata value
+			 * - software parser settings
+			 * - packets length (legacy MPW only)
+			 * - scheduling is not required
+			 */
+			if (!mlx5_qp_tx_match_empw(qp_txq, &wqem->eseg,
+						loc, dlen, olx))
+				break;
+			/* Packet attributes match, continue the same eMPW. */
+			if ((uintptr_t)dseg >= (uintptr_t)qp_txq->sq_wqes_end)
+				dseg = (struct mlx5_wqe_dseg *)qp_txq->sq_wqes;
+		}
+		/*
+		 * We get here to close an existing eMPW
+		 * session and start the new one.
+		 */
+		MLX5_ASSERT(pkts_n);
+		part -= room;
+		if (unlikely(!part))
+			return MLX5_TXCMP_CODE_EXIT;
+		mlx5_qp_tx_idone_empw(qp_txq, loc, part, slen, wqem, olx);
+		if (unlikely(!loc->elts_free ||
+			     !loc->wqe_free))
+			return MLX5_TXCMP_CODE_EXIT;
+		/* Continue the loop with new eMPW session. */
+	}
+	MLX5_ASSERT(false);
+}
+
+
+/**
+ * Update send loop variables and WQE for eMPW loop without data inlining.
+ * Number of Data Segments is equal to the number of sent packets.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param ds
+ *   Number of packets/Data Segments/Packets.
+ * @param slen
+ *   Accumulated statistics, bytes sent.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ *
+ * @return
+ *  true - packet match with eMPW batch attributes.
+ *  false - no match, eMPW should be restarted.
+ */
+static __rte_always_inline void
+mlx5_qp_tx_sdone_empw(struct mlx5_qp_data *__rte_restrict qp_txq,
+		   struct mlx5_qp_txq_local *__rte_restrict loc,
+		   unsigned int ds,
+		   unsigned int slen,
+		   unsigned int olx __rte_unused)
+{
+	MLX5_ASSERT(!MLX5_TXOFF_CONFIG(INLINE));
+#ifdef MLX5_PMD_SOFT_COUNTERS
+	/* Update sent data bytes counter. */
+	 qp_txq->stats.obytes += slen;
+#else
+	(void)slen;
+#endif
+	loc->elts_free -= ds;
+	loc->pkts_sent += ds;
+	ds += 2;
+	loc->wqe_last->cseg.sq_ds = rte_cpu_to_be_32(qp_txq->qp_num_8s | ds);
+	qp_txq->sq_wqe_ci += (ds + 3) / 4;
+	loc->wqe_free -= (ds + 3) / 4;
+}
+
+/**
+ * The set of Tx burst functions for single-segment packets without TSO
+ * and with Multi-Packet Writing feature support.
+ * Supports all types of Tx offloads, except multi-packets and TSO.
+ *
+ * Uses MLX5_OPCODE_EMPW to build WQEs if possible and sends as many packet
+ * per WQE as it can. If eMPW is not configured or packet can not be sent with
+ * eMPW (VLAN insertion) the ordinary SEND opcode is used and only one packet
+ * placed in WQE.
+ *
+ * Functions stop sending if it encounters the multi-segment packet or packet
+ * with TSO requested.
+ *
+ * The routines are responsible for storing processed mbuf into elts ring buffer
+ * and update elts_head if inlining offload is requested. Otherwise the copying
+ * mbufs to elts can be postponed and completed at the end of burst routine.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param[in] pkts
+ *   Packets to transmit.
+ * @param pkts_n
+ *   Number of packets in array.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ *
+ * @return
+ *   MLX5_TXCMP_CODE_EXIT - sending is done or impossible.
+ *   MLX5_TXCMP_CODE_ERROR - some unrecoverable error occurred.
+ *   MLX5_TXCMP_CODE_MULTI - multi-segment packet encountered.
+ *   MLX5_TXCMP_CODE_TSO - TSO packet encountered.
+ *   MLX5_TXCMP_CODE_SINGLE - used inside functions set.
+ *   MLX5_TXCMP_CODE_EMPW - used inside functions set.
+ *
+ * Local context variables updated.
+ *
+ *
+ * The routine sends packets with MLX5_OPCODE_EMPW
+ * without inlining, this is dedicated optimized branch.
+ * No VLAN insertion is supported.
+ */
+static __rte_always_inline enum mlx5_txcmp_code
+mlx5_qp_tx_burst_empw_simple(struct mlx5_qp_data *__rte_restrict qp_txq,
+			  struct rte_mbuf **__rte_restrict pkts,
+			  unsigned int pkts_n,
+			  struct mlx5_qp_txq_local *__rte_restrict loc,
+			  unsigned int olx)
+{
+	/*
+	 * Subroutine is the part of mlx5_tx_burst_single() and sends
+	 * single-segment packet with eMPW opcode without data inlining.
+	 */
+	MLX5_ASSERT(!MLX5_TXOFF_CONFIG(INLINE));
+	MLX5_ASSERT(MLX5_TXOFF_CONFIG(EMPW));
+	MLX5_ASSERT(loc->elts_free && loc->wqe_free);
+	MLX5_ASSERT(pkts_n > loc->pkts_sent);
+	pkts += loc->pkts_sent + 1;
+	pkts_n -= loc->pkts_sent;
+	for (;;) {
+		struct mlx5_wqe_dseg *__rte_restrict dseg;
+		struct mlx5_wqe_eseg *__rte_restrict eseg;
+		enum mlx5_txcmp_code ret;
+		unsigned int part, loop;
+		unsigned int slen = 0;
+
+next_empw:
+		MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
+		part = RTE_MIN(pkts_n, MLX5_TXOFF_CONFIG(MPW) ?
+				       MLX5_MPW_MAX_PACKETS :
+				       MLX5_EMPW_MAX_PACKETS);
+		if (unlikely(loc->elts_free < part)) {
+			/* We have no enough elts to save all mbufs. */
+			if (unlikely(loc->elts_free < MLX5_EMPW_MIN_PACKETS))
+				return MLX5_TXCMP_CODE_EXIT;
+			/* But we still able to send at least minimal eMPW. */
+			part = loc->elts_free;
+		}
+		if (MLX5_TXOFF_CONFIG(TXPP)) {
+			enum mlx5_txcmp_code wret;
+
+			/* Generate WAIT for scheduling if requested. */
+			wret = mlx5_qp_tx_schedule_send(qp_txq, loc, 0, olx);
+			if (wret == MLX5_TXCMP_CODE_EXIT)
+				return MLX5_TXCMP_CODE_EXIT;
+			if (wret == MLX5_TXCMP_CODE_ERROR)
+				return MLX5_TXCMP_CODE_ERROR;
+		}
+		/* Check whether we have enough WQEs */
+		if (unlikely(loc->wqe_free < ((2 + part + 3) / 4))) {
+			if (unlikely(loc->wqe_free <
+				((2 + MLX5_EMPW_MIN_PACKETS + 3) / 4)))
+				return MLX5_TXCMP_CODE_EXIT;
+			part = (loc->wqe_free * 4) - 2;
+		}
+		if (likely(part > 1))
+			rte_prefetch0(*pkts);
+		loc->wqe_last = qp_txq->sq_wqes + (qp_txq->sq_wqe_ci & qp_txq->sq_wqe_m);
+		/*
+		 * Build eMPW title WQEBB:
+		 * - Control Segment, eMPW opcode
+		 * - Ethernet Segment, no inline
+		 */
+		mlx5_qp_tx_cseg_init(qp_txq, loc, loc->wqe_last, part + 2,
+				  MLX5_OPCODE_ENHANCED_MPSW, olx);
+		mlx5_qp_tx_eseg_none(qp_txq, loc, loc->wqe_last,
+				  olx & ~MLX5_TXOFF_CONFIG_VLAN);
+		eseg = &loc->wqe_last->eseg;
+		dseg = &loc->wqe_last->dseg[0];
+		loop = part;
+		/* Store the packet length for legacy MPW. */
+		if (MLX5_TXOFF_CONFIG(MPW))
+			eseg->mss = rte_cpu_to_be_16
+					(rte_pktmbuf_data_len(loc->mbuf));
+		for (;;) {
+			uint32_t dlen = rte_pktmbuf_data_len(loc->mbuf);
+#ifdef MLX5_PMD_SOFT_COUNTERS
+			/* Update sent data bytes counter. */
+			slen += dlen;
+#endif
+			rte_pmd_mlx5_trace_tx_push(loc->mbuf, qp_txq->sq_wqe_ci);
+			mlx5_qp_tx_dseg_ptr
+				(qp_txq, loc, dseg,
+				 rte_pktmbuf_mtod(loc->mbuf, uint8_t *),
+				 dlen, olx);
+			if (unlikely(--loop == 0))
+				break;
+			loc->mbuf = *pkts++;
+			if (likely(loop > 1))
+				rte_prefetch0(*pkts);
+			ret = mlx5_qp_tx_able_to_empw(qp_txq, loc, olx, true);
+			/*
+			 * Unroll the completion code to avoid
+			 * returning variable value - it results in
+			 * unoptimized sequent checking in caller.
+			 */
+			if (ret == MLX5_TXCMP_CODE_MULTI) {
+				part -= loop;
+				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
+				if (unlikely(!loc->elts_free ||
+					     !loc->wqe_free))
+					return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_TXCMP_CODE_MULTI;
+			}
+			MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
+			if (ret == MLX5_TXCMP_CODE_TSO) {
+				part -= loop;
+				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
+				if (unlikely(!loc->elts_free ||
+					     !loc->wqe_free))
+					return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_TXCMP_CODE_TSO;
+			}
+			if (ret == MLX5_TXCMP_CODE_SINGLE) {
+				part -= loop;
+				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
+				if (unlikely(!loc->elts_free ||
+					     !loc->wqe_free))
+					return MLX5_TXCMP_CODE_EXIT;
+				return MLX5_TXCMP_CODE_SINGLE;
+			}
+			if (ret != MLX5_TXCMP_CODE_EMPW) {
+				MLX5_ASSERT(false);
+				part -= loop;
+				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
+				return MLX5_TXCMP_CODE_ERROR;
+			}
+			/*
+			 * Check whether packet parameters coincide
+			 * within assumed eMPW batch:
+			 * - check sum settings
+			 * - metadata value
+			 * - software parser settings
+			 * - packets length (legacy MPW only)
+			 * - scheduling is not required
+			 */
+			if (!mlx5_qp_tx_match_empw(qp_txq, eseg, loc, dlen, olx)) {
+				MLX5_ASSERT(loop);
+				part -= loop;
+				mlx5_qp_tx_sdone_empw(qp_txq, loc, part, slen, olx);
+				if (unlikely(!loc->elts_free ||
+					     !loc->wqe_free))
+					return MLX5_TXCMP_CODE_EXIT;
+				pkts_n -= part;
+				goto next_empw;
+			}
+			/* Packet attributes match, continue the same eMPW. */
+			++dseg;
+			if ((uintptr_t)dseg >= (uintptr_t)qp_txq->sq_wqes_end)
+				dseg = (struct mlx5_wqe_dseg *)qp_txq->sq_wqes;
+		}
+		/* eMPW is built successfully, update loop parameters. */
+		MLX5_ASSERT(!loop);
+		MLX5_ASSERT(pkts_n >= part);
+#ifdef MLX5_PMD_SOFT_COUNTERS
+		/* Update sent data bytes counter. */
+		qp_txq->stats.obytes += slen;
+#endif
+		loc->elts_free -= part;
+		loc->pkts_sent += part;
+		qp_txq->sq_wqe_ci += (2 + part + 3) / 4;
+		loc->wqe_free -= (2 + part + 3) / 4;
+		pkts_n -= part;
+		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
+			return MLX5_TXCMP_CODE_EXIT;
+		loc->mbuf = *pkts++;
+		ret = mlx5_qp_tx_able_to_empw(qp_txq, loc, olx, true);
+		if (unlikely(ret != MLX5_TXCMP_CODE_EMPW))
+			return ret;
+		/* Continue sending eMPW batches. */
+	}
+	MLX5_ASSERT(false);
+}
+
+
+/**
+ * Build the Ethernet Segment with minimal inlined data
+ * of MLX5_ESEG_MIN_INLINE_SIZE bytes length. This is
+ * used to fill the gap in single WQEBB WQEs.
+ * Supports Software Parser, Checksums and VLAN
+ * insertion Tx offload features.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param wqe
+ *   Pointer to WQE to fill with built Ethernet Segment.
+ * @param vlan
+ *   Length of VLAN tag insertion if any.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ */
+static __rte_always_inline void
+mlx5_qp_tx_eseg_dmin(struct mlx5_qp_data *__rte_restrict qp_txq __rte_unused,
+		  struct mlx5_qp_txq_local *__rte_restrict loc,
+		  struct mlx5_wqe *__rte_restrict wqe,
+		  unsigned int vlan,
+		  unsigned int olx)
+{
+	struct mlx5_wqe_eseg *__rte_restrict es = &wqe->eseg;
+	uint32_t csum;
+	uint8_t *psrc, *pdst;
+
+	/*
+	 * Calculate and set check sum flags first, dword field
+	 * in segment may be shared with Software Parser flags.
+	 */
+	csum = MLX5_TXOFF_CONFIG(CSUM) ? qp_txq_ol_cksum_to_cs(loc->mbuf) : 0;
+	es->flags = rte_cpu_to_le_32(csum);
+	/*
+	 * Calculate and set Software Parser offsets and flags.
+	 * These flags a set for custom UDP and IP tunnel packets.
+	 */
+	es->swp_offs = qp_txq_mbuf_to_swp(loc, &es->swp_flags, olx);
+	/* Fill metadata field if needed. */
+	es->metadata = MLX5_TXOFF_CONFIG(METADATA) ?
+		       loc->mbuf->ol_flags & RTE_MBUF_DYNFLAG_TX_METADATA ?
+		       rte_cpu_to_be_32(*RTE_FLOW_DYNF_METADATA(loc->mbuf)) :
+		       0 : 0;
+	psrc = rte_pktmbuf_mtod(loc->mbuf, uint8_t *);
+	es->inline_hdr_sz = RTE_BE16(MLX5_ESEG_MIN_INLINE_SIZE);
+	es->inline_data = *(unaligned_uint16_t *)psrc;
+	psrc +=	sizeof(uint16_t);
+	pdst = (uint8_t *)(es + 1);
+	if (MLX5_TXOFF_CONFIG(VLAN) && vlan) {
+		/* Implement VLAN tag insertion as part inline data. */
+		memcpy(pdst, psrc, 2 * RTE_ETHER_ADDR_LEN - sizeof(uint16_t));
+		pdst += 2 * RTE_ETHER_ADDR_LEN - sizeof(uint16_t);
+		psrc +=	2 * RTE_ETHER_ADDR_LEN - sizeof(uint16_t);
+		/* Insert VLAN ethertype + VLAN tag. */
+		*(unaligned_uint32_t *)pdst = rte_cpu_to_be_32
+						((RTE_ETHER_TYPE_VLAN << 16) |
+						 loc->mbuf->vlan_tci);
+		pdst += sizeof(struct rte_vlan_hdr);
+		/* Copy the rest two bytes from packet data. */
+		MLX5_ASSERT(pdst == RTE_PTR_ALIGN(pdst, sizeof(uint16_t)));
+		*(uint16_t *)pdst = *(unaligned_uint16_t *)psrc;
+	} else {
+		/* Fill the gap in the title WQEBB with inline data. */
+		rte_mov16(pdst, psrc);
+	}
+}
+
+
+/**
+ * The routine sends packets with ordinary MLX5_OPCODE_SEND.
+ * Data inlining and VLAN insertion are supported.
+ */
+static __rte_always_inline enum mlx5_txcmp_code
+mlx5_qp_tx_burst_single_send(struct mlx5_qp_data *__rte_restrict qp_txq,
+			  struct rte_mbuf **__rte_restrict pkts,
+			  unsigned int pkts_n,
+			  struct mlx5_qp_txq_local *__rte_restrict loc,
+			  unsigned int olx)
+{
+	/*
+	 * Subroutine is the part of mlx5_tx_burst_single()
+	 * and sends single-segment packet with SEND opcode.
+	 */
+	MLX5_ASSERT(loc->elts_free && loc->wqe_free);
+	MLX5_ASSERT(pkts_n > loc->pkts_sent);
+	pkts += loc->pkts_sent + 1;
+	pkts_n -= loc->pkts_sent;
+	for (;;) {
+		struct mlx5_wqe *__rte_restrict wqe;
+		enum mlx5_txcmp_code ret;
+
+		MLX5_ASSERT(NB_SEGS(loc->mbuf) == 1);
+		MLX5_ASSERT(loc->elts_free);
+		if (MLX5_TXOFF_CONFIG(TXPP)) {
+			enum mlx5_txcmp_code wret;
+
+			/* Generate WAIT for scheduling if requested. */
+			wret = mlx5_qp_tx_schedule_send(qp_txq, loc, 0, olx);
+			if (wret == MLX5_TXCMP_CODE_EXIT)
+				return MLX5_TXCMP_CODE_EXIT;
+			if (wret == MLX5_TXCMP_CODE_ERROR)
+				return MLX5_TXCMP_CODE_ERROR;
+		}
+		if (MLX5_TXOFF_CONFIG(INLINE)) {
+			unsigned int inlen, vlan = 0;
+
+			inlen = rte_pktmbuf_data_len(loc->mbuf);
+			if (MLX5_TXOFF_CONFIG(VLAN) &&
+			    loc->mbuf->ol_flags & RTE_MBUF_F_TX_VLAN) {
+				vlan = sizeof(struct rte_vlan_hdr);
+				inlen += vlan;
+			}
+			/*
+			 * If inlining is enabled at configuration time
+			 * the limit must be not less than minimal size.
+			 * Otherwise we would do extra check for data
+			 * size to avoid crashes due to length overflow.
+			 */
+			MLX5_ASSERT(qp_txq->inlen_send >=
+				    MLX5_ESEG_MIN_INLINE_SIZE);
+			if (inlen <= qp_txq->inlen_send) {
+				unsigned int seg_n, wqe_n;
+
+				rte_prefetch0(rte_pktmbuf_mtod
+						(loc->mbuf, uint8_t *));
+				/* Check against minimal length. */
+				if (inlen <= MLX5_ESEG_MIN_INLINE_SIZE)
+					return MLX5_TXCMP_CODE_ERROR;
+				if (loc->mbuf->ol_flags &
+				    RTE_MBUF_F_TX_DYNF_NOINLINE) {
+					/*
+					 * The hint flag not to inline packet
+					 * data is set. Check whether we can
+					 * follow the hint.
+					 */
+					if ((!MLX5_TXOFF_CONFIG(EMPW) &&
+					      qp_txq->inlen_mode) ||
+					    (MLX5_TXOFF_CONFIG(MPW) &&
+					     qp_txq->inlen_mode)) {
+						if (inlen <= qp_txq->inlen_send)
+							goto single_inline;
+						/*
+						 * The hardware requires the
+						 * minimal inline data header.
+						 */
+						goto single_min_inline;
+					}
+					if (MLX5_TXOFF_CONFIG(VLAN) &&
+					    vlan && !qp_txq->vlan_en) {
+						/*
+						 * We must insert VLAN tag
+						 * by software means.
+						 */
+						goto single_part_inline;
+					}
+					goto single_no_inline;
+				}
+single_inline:
+				/*
+				 * Completely inlined packet data WQE:
+				 * - Control Segment, SEND opcode
+				 * - Ethernet Segment, no VLAN insertion
+				 * - Data inlined, VLAN optionally inserted
+				 * - Alignment to MLX5_WSEG_SIZE
+				 * Have to estimate amount of WQEBBs
+				 */
+				seg_n = (inlen + 3 * MLX5_WSEG_SIZE -
+					 MLX5_ESEG_MIN_INLINE_SIZE +
+					 MLX5_WSEG_SIZE - 1) / MLX5_WSEG_SIZE;
+				/* Check if there are enough WQEBBs. */
+				wqe_n = (seg_n + 3) / 4;
+				if (wqe_n > loc->wqe_free)
+					return MLX5_TXCMP_CODE_EXIT;
+				wqe = qp_txq->sq_wqes + (qp_txq->sq_wqe_ci & qp_txq->sq_wqe_m);
+				loc->wqe_last = wqe;
+				mlx5_qp_tx_cseg_init(qp_txq, loc, wqe, seg_n,
+						  MLX5_OPCODE_SEND, olx);
+				rte_pmd_mlx5_trace_tx_push(loc->mbuf, qp_txq->sq_wqe_ci);
+				mlx5_qp_tx_eseg_data(qp_txq, loc, wqe,
+						  vlan, inlen, 0, olx);
+				qp_txq->sq_wqe_ci += wqe_n;
+				loc->wqe_free -= wqe_n;
+				/*
+				 * Packet data are completely inlined,
+				 * free the packet immediately.
+				 */
+				rte_pktmbuf_free_seg(loc->mbuf);
+			} else if ((!MLX5_TXOFF_CONFIG(EMPW) ||
+				     MLX5_TXOFF_CONFIG(MPW)) &&
+					qp_txq->inlen_mode) {
+				/*
+				 * If minimal inlining is requested the eMPW
+				 * feature should be disabled due to data is
+				 * inlined into Ethernet Segment, which can
+				 * not contain inlined data for eMPW due to
+				 * segment shared for all packets.
+				 */
+				struct mlx5_wqe_dseg *__rte_restrict dseg;
+				unsigned int ds;
+				uint8_t *dptr;
+
+				/*
+				 * The inline-mode settings require
+				 * to inline the specified amount of
+				 * data bytes to the Ethernet Segment.
+				 * We should check the free space in
+				 * WQE ring buffer to inline partially.
+				 */
+single_min_inline:
+				MLX5_ASSERT(qp_txq->inlen_send >= qp_txq->inlen_mode);
+				MLX5_ASSERT(inlen > qp_txq->inlen_mode);
+				MLX5_ASSERT(qp_txq->inlen_mode >=
+					    MLX5_ESEG_MIN_INLINE_SIZE);
+				/*
+				 * Check whether there are enough free WQEBBs:
+				 * - Control Segment
+				 * - Ethernet Segment
+				 * - First Segment of inlined Ethernet data
+				 * - ... data continued ...
+				 * - Finishing Data Segment of pointer type
+				 */
+				ds = (MLX5_WQE_CSEG_SIZE +
+				      MLX5_WQE_ESEG_SIZE +
+				      MLX5_WQE_DSEG_SIZE +
+				      qp_txq->inlen_mode -
+				      MLX5_ESEG_MIN_INLINE_SIZE +
+				      MLX5_WQE_DSEG_SIZE +
+				      MLX5_WSEG_SIZE - 1) / MLX5_WSEG_SIZE;
+				if (loc->wqe_free < ((ds + 3) / 4))
+					return MLX5_TXCMP_CODE_EXIT;
+				/*
+				 * Build the ordinary SEND WQE:
+				 * - Control Segment
+				 * - Ethernet Segment, inline inlen_mode bytes
+				 * - Data Segment of pointer type
+				 */
+				wqe = qp_txq->sq_wqes + (qp_txq->sq_wqe_ci & qp_txq->sq_wqe_m);
+				loc->wqe_last = wqe;
+				mlx5_qp_tx_cseg_init(qp_txq, loc, wqe, ds,
+						  MLX5_OPCODE_SEND, olx);
+				rte_pmd_mlx5_trace_tx_push(loc->mbuf, qp_txq->sq_wqe_ci);
+				dseg = mlx5_qp_tx_eseg_data(qp_txq, loc, wqe, vlan,
+							 qp_txq->inlen_mode,
+							 0, olx);
+				dptr = rte_pktmbuf_mtod(loc->mbuf, uint8_t *) +
+				       qp_txq->inlen_mode - vlan;
+				inlen -= qp_txq->inlen_mode;
+				mlx5_qp_tx_dseg_ptr(qp_txq, loc, dseg,
+						 dptr, inlen, olx);
+				/*
+				 * WQE is built, update the loop parameters
+				 * and got to the next packet.
+				 */
+				qp_txq->sq_wqe_ci += (ds + 3) / 4;
+				loc->wqe_free -= (ds + 3) / 4;
+				/* We have to store mbuf in elts.*/
+				MLX5_ASSERT(MLX5_TXOFF_CONFIG(INLINE));
+				qp_txq->sq_elts[qp_txq->sq_elts_head++ & qp_txq->sq_elts_m] =
+						loc->mbuf;
+				--loc->elts_free;
+			} else {
+				uint8_t *dptr;
+				unsigned int dlen;
+
+				/*
+				 * Partially inlined packet data WQE, we have
+				 * some space in title WQEBB, we can fill it
+				 * with some packet data. It takes one WQEBB,
+				 * it is available, no extra space check:
+				 * - Control Segment, SEND opcode
+				 * - Ethernet Segment, no VLAN insertion
+				 * - MLX5_ESEG_MIN_INLINE_SIZE bytes of Data
+				 * - Data Segment, pointer type
+				 *
+				 * We also get here if VLAN insertion is not
+				 * supported by HW, the inline is enabled.
+				 */
+single_part_inline:
+				wqe = qp_txq->sq_wqes + (qp_txq->sq_wqe_ci & qp_txq->sq_wqe_m);
+				loc->wqe_last = wqe;
+				mlx5_qp_tx_cseg_init(qp_txq, loc, wqe, 4,
+						  MLX5_OPCODE_SEND, olx);
+				rte_pmd_mlx5_trace_tx_push(loc->mbuf, qp_txq->sq_wqe_ci);
+				mlx5_qp_tx_eseg_dmin(qp_txq, loc, wqe, vlan, olx);
+				dptr = rte_pktmbuf_mtod(loc->mbuf, uint8_t *) +
+				       MLX5_ESEG_MIN_INLINE_SIZE - vlan;
+				/*
+				 * The length check is performed above, by
+				 * comparing with qp_txq->inlen_send. We should
+				 * not get overflow here.
+				 */
+				MLX5_ASSERT(inlen > MLX5_ESEG_MIN_INLINE_SIZE);
+				dlen = inlen - MLX5_ESEG_MIN_INLINE_SIZE;
+				mlx5_qp_tx_dseg_ptr(qp_txq, loc, &wqe->dseg[1],
+						 dptr, dlen, olx);
+				++qp_txq->sq_wqe_ci;
+				--loc->wqe_free;
+				/* We have to store mbuf in elts.*/
+				MLX5_ASSERT(MLX5_TXOFF_CONFIG(INLINE));
+				qp_txq->sq_elts[qp_txq->sq_elts_head++ & qp_txq->sq_elts_m] =
+						loc->mbuf;
+				--loc->elts_free;
+			}
+#ifdef MLX5_PMD_SOFT_COUNTERS
+			/* Update sent data bytes counter. */
+			qp_txq->stats.obytes += vlan +
+					rte_pktmbuf_data_len(loc->mbuf);
+#endif
+		} else {
+			/*
+			 * No inline at all, it means the CPU cycles saving
+			 * is prioritized at configuration, we should not
+			 * copy any packet data to WQE.
+			 *
+			 * SEND WQE, one WQEBB:
+			 * - Control Segment, SEND opcode
+			 * - Ethernet Segment, optional VLAN, no inline
+			 * - Data Segment, pointer type
+			 */
+single_no_inline:
+			wqe = qp_txq->sq_wqes + (qp_txq->sq_wqe_ci & qp_txq->sq_wqe_m);
+			loc->wqe_last = wqe;
+			mlx5_qp_tx_cseg_init(qp_txq, loc, wqe, 3,
+					  MLX5_OPCODE_SEND, olx);
+			rte_pmd_mlx5_trace_tx_push(loc->mbuf, qp_txq->sq_wqe_ci);
+			mlx5_qp_tx_eseg_none(qp_txq, loc, wqe, olx);
+			mlx5_qp_tx_dseg_ptr
+				(qp_txq, loc, &wqe->dseg[0],
+				 rte_pktmbuf_mtod(loc->mbuf, uint8_t *),
+				 rte_pktmbuf_data_len(loc->mbuf), olx);
+			++qp_txq->sq_wqe_ci;
+			--loc->wqe_free;
+			/*
+			 * We should not store mbuf pointer in elts
+			 * if no inlining is configured, this is done
+			 * by calling routine in a batch copy.
+			 */
+			if (MLX5_TXOFF_CONFIG(INLINE))
+				qp_txq->sq_elts[qp_txq->sq_elts_head++ & qp_txq->sq_elts_m] =
+							loc->mbuf;
+			--loc->elts_free;
+#ifdef MLX5_PMD_SOFT_COUNTERS
+			/* Update sent data bytes counter. */
+			qp_txq->stats.obytes += rte_pktmbuf_data_len(loc->mbuf);
+			if (MLX5_TXOFF_CONFIG(VLAN) &&
+			    loc->mbuf->ol_flags & RTE_MBUF_F_TX_VLAN)
+				qp_txq->stats.obytes +=
+					sizeof(struct rte_vlan_hdr);
+#endif
+		}
+		++loc->pkts_sent;
+		--pkts_n;
+		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
+			return MLX5_TXCMP_CODE_EXIT;
+		loc->mbuf = *pkts++;
+		if (pkts_n > 1)
+			rte_prefetch0(*pkts);
+		ret = mlx5_qp_tx_able_to_empw(qp_txq, loc, olx, true);
+		if (unlikely(ret != MLX5_TXCMP_CODE_SINGLE))
+			return ret;
+	}
+	MLX5_ASSERT(false);
+}
+
+static __rte_always_inline enum mlx5_txcmp_code
+mlx5_qp_tx_burst_single(struct mlx5_qp_data *__rte_restrict qp_txq,
+		     struct rte_mbuf **__rte_restrict pkts,
+		     unsigned int pkts_n,
+		     struct mlx5_qp_txq_local *__rte_restrict loc,
+		     unsigned int olx)
+{
+	enum mlx5_txcmp_code ret;
+
+	ret = mlx5_qp_tx_able_to_empw(qp_txq, loc, olx, false);
+	if (ret == MLX5_TXCMP_CODE_SINGLE)
+		goto ordinary_send;
+	MLX5_ASSERT(ret == MLX5_TXCMP_CODE_EMPW);
+	for (;;) {
+		/* Optimize for inline/no inline eMPW send. */
+		ret = (MLX5_TXOFF_CONFIG(INLINE)) ?
+			mlx5_qp_tx_burst_empw_inline
+				(qp_txq, pkts, pkts_n, loc, olx) :
+			mlx5_qp_tx_burst_empw_simple
+				(qp_txq, pkts, pkts_n, loc, olx);
+		if (ret != MLX5_TXCMP_CODE_SINGLE)
+			return ret;
+		/* The resources to send one packet should remain. */
+		MLX5_ASSERT(loc->elts_free && loc->wqe_free);
+ordinary_send:
+		ret = mlx5_qp_tx_burst_single_send(qp_txq, pkts, pkts_n, loc, olx);
+		MLX5_ASSERT(ret != MLX5_TXCMP_CODE_SINGLE);
+		if (ret != MLX5_TXCMP_CODE_EMPW)
+			return ret;
+		/* The resources to send one packet should remain. */
+		MLX5_ASSERT(loc->elts_free && loc->wqe_free);
+	}
+}
+
+
+/**
+ * Set completion request flag for all issued WQEs.
+ * This routine is intended to be used with enabled fast path tracing
+ * and send scheduling on time to provide the detailed report in trace
+ * for send completions on every WQE.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ */
+static __rte_always_inline void
+mlx5_qp_tx_request_completion_trace(struct mlx5_qp_data *__rte_restrict qp_txq,
+				 struct mlx5_qp_txq_local *__rte_restrict loc,
+				 unsigned int olx)
+{
+	uint16_t head = qp_txq->sq_elts_comp;
+
+	while (qp_txq->sq_wqe_comp != qp_txq->sq_wqe_ci) {
+		volatile struct mlx5_wqe *wqe;
+		uint32_t wqe_n;
+
+		MLX5_ASSERT(loc->wqe_last);
+		wqe = qp_txq->sq_wqes + (qp_txq->sq_wqe_comp & qp_txq->sq_wqe_m);
+		if (wqe == loc->wqe_last) {
+			head = qp_txq->sq_elts_head;
+			head +=	MLX5_TXOFF_CONFIG(INLINE) ?
+				0 : loc->pkts_sent - loc->pkts_copy;
+			qp_txq->sq_elts_comp = head;
+		}
+		/* Completion request flag was set on cseg constructing. */
+#ifdef RTE_LIBRTE_MLX5_DEBUG
+		qp_txq->fcqs[qp_txq->cq_pi++ & qp_txq->cqe_m] = head |
+			  (wqe->cseg.opcode >> 8) << 16;
+#else
+		qp_txq->fcqs[qp_txq->cq_pi++ & qp_txq->cqe_m] = head;
+#endif
+		/* A CQE slot must always be available. */
+		MLX5_ASSERT((qp_txq->cq_pi - qp_txq->cq_ci) <= qp_txq->cqe_s);
+		/* Advance to the next WQE in the queue. */
+		wqe_n = rte_be_to_cpu_32(wqe->cseg.sq_ds) & 0x3F;
+		qp_txq->sq_wqe_comp += RTE_ALIGN(wqe_n, 4) / 4;
+	}
+}
+
+
+/**
+ * Check if the completion request flag should be set in the last WQE.
+ * Both pushed mbufs and WQEs are monitored and the completion request
+ * flag is set if any of thresholds is reached.
+ *
+ * @param txq
+ *   Pointer to TX queue structure.
+ * @param loc
+ *   Pointer to burst routine local context.
+ * @param olx
+ *   Configured Tx offloads mask. It is fully defined at
+ *   compile time and may be used for optimization.
+ */
+static __rte_always_inline void
+mlx5_qp_tx_request_completion(struct mlx5_qp_data *__rte_restrict qp_txq,
+			   struct mlx5_qp_txq_local *__rte_restrict loc,
+			   unsigned int olx)
+{
+	uint16_t head = qp_txq->sq_elts_head;
+	unsigned int part;
+
+	part = MLX5_TXOFF_CONFIG(INLINE) ?
+	       0 : loc->pkts_sent - loc->pkts_copy;
+	head += part;
+	if ((uint16_t)(head - qp_txq->sq_elts_comp) >= MLX5_TX_COMP_THRESH ||
+	     (MLX5_TXOFF_CONFIG(INLINE) &&
+	     (uint16_t)(qp_txq->sq_wqe_ci - qp_txq->sq_wqe_comp) >= qp_txq->sq_wqe_thres)) {
+		volatile struct mlx5_wqe *last = loc->wqe_last;
+
+		MLX5_ASSERT(last);
+		qp_txq->sq_elts_comp = head;
+		if (MLX5_TXOFF_CONFIG(INLINE))
+			qp_txq->sq_wqe_comp = qp_txq->sq_wqe_ci;
+		/* Request unconditional completion on last WQE. */
+		last->cseg.flags = RTE_BE32(MLX5_COMP_ALWAYS <<
+					    MLX5_COMP_MODE_OFFSET);
+		/* Save elts_head in dedicated free on completion queue. */
+#ifdef RTE_LIBRTE_MLX5_DEBUG
+		qp_txq->fcqs[qp_txq->cq_pi++ & qp_txq->cqe_m] = head |
+			  (last->cseg.opcode >> 8) << 16;
+#else
+		qp_txq->fcqs[qp_txq->cq_pi++ & qp_txq->cqe_m] = head;
+#endif
+		/* A CQE slot must always be available. */
+		MLX5_ASSERT((qp_txq->cq_pi - qp_txq->cq_ci) <= qp_txq->cqe_s);
+	}
 }
 
 /**
@@ -2081,7 +3643,7 @@ enter_send_tso:
 		 */
 enter_send_single:
 		MLX5_ASSERT(pkts_n > loc.pkts_sent);
-		ret = mlx5_tx_burst_single(txq, pkts, pkts_n, &loc, olx);
+		ret = mlx5_qp_tx_burst_single(qp_txq, pkts, pkts_n, &loc, olx);
 		/*
 		 * These returned code checks are supposed
 		 * to be optimized out due to routine inlining.
@@ -2126,9 +3688,9 @@ enter_send_single:
 		goto burst_exit;
 	/* Request CQE generation if limits are reached. */
 	if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
-		mlx5_tx_request_completion_trace(txq, &loc, olx);
+		mlx5_qp_tx_request_completion_trace(qp_txq, &loc, olx);
 	else
-		mlx5_tx_request_completion(txq, &loc, olx);
+		mlx5_qp_tx_request_completion(qp_txq, &loc, olx);
 	/*
 	 * Ring QP doorbell immediately after WQE building completion
 	 * to improve latencies. The pure software related data treatment
@@ -2156,7 +3718,7 @@ enter_send_single:
 	 *   packets are coming and the write barrier will be issued on
 	 *   the next burst (after descriptor writing, at least).
 	 */
-	mlx5_doorbell_ring(mlx5_tx_bfreg(qp_txq),
+	mlx5_doorbell_ring(mlx5_qp_tx_bfreg(qp_txq),
 			   *(volatile uint64_t *)loc.wqe_last, qp_txq->sq_wqe_ci,
 			   qp_txq->sq_db, !qp_txq->db_nc &&
 			   (!qp_txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
@@ -2171,7 +3733,7 @@ enter_send_single:
 		 * Unfortunately if inlining is enabled the gaps in pointer
 		 * array may happen due to early freeing of the inlined mbufs.
 		 */
-		mlx5_tx_copy_elts(qp_txq, pkts + loc.pkts_copy, part, olx);
+		mlx5_qp_tx_copy_elts(qp_txq, pkts + loc.pkts_copy, part, olx);
 		loc.pkts_copy = loc.pkts_sent;
 	}
 	MLX5_ASSERT(qp_txq->sq_elts_s >= (uint16_t)(qp_txq->sq_elts_head - qp_txq->sq_elts_tail));
@@ -2190,10 +3752,10 @@ burst_exit:
 	qp_txq->stats.opackets += loc.pkts_sent;
 #endif
 	if (MLX5_TXOFF_CONFIG(INLINE) && loc.mbuf_free)
-		__mlx5_tx_free_mbuf(qp_txq, pkts, loc.mbuf_free, olx);
+		__mlx5_qp_tx_free_mbuf(qp_txq, pkts, loc.mbuf_free, olx);
 	/* Trace productive bursts only. */
 	if (__rte_trace_point_fp_is_enabled() && loc.pkts_sent)
-		rte_pmd_mlx5_trace_tx_exit(mlx5_read_pcibar_clock_from_txq(qp_txq),
+		rte_pmd_mlx5_trace_tx_exit(mlx5_read_pcibar_clock_from_qp_txq(qp_txq),
 					   loc.pkts_sent, pkts_n);
 	return loc.pkts_sent;
 }
