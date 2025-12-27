@@ -1775,6 +1775,8 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 		goto error;
 	}
 
+	mlx5_devx_cmd_query_qp_state(qp_obj->qp_obj.qp,qp_obj->qp_obj.qp->id);
+
 #ifdef HAVE_IBV_FLOW_DV_SUPPORT
 	/*
 	 * If using DevX need to query and store TIS transport domain value.

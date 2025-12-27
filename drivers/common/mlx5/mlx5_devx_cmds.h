@@ -788,6 +788,9 @@ __rte_internal
 struct mlx5_devx_obj *mlx5_devx_cmd_create_qp(void *ctx,
 					      struct mlx5_devx_qp_attr *attr);
 __rte_internal
+int mlx5_devx_cmd_query_qp_state(struct mlx5_devx_obj *qp,
+			      uint32_t remote_qp_id);
+__rte_internal
 int mlx5_devx_cmd_modify_qp_state(struct mlx5_devx_obj *qp,
 				  uint32_t qp_st_mod_op, uint32_t remote_qp_id);
 __rte_internal

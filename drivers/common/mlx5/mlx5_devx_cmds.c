@@ -2700,6 +2700,47 @@ mlx5_devx_cmd_create_qp(void *ctx,
 	return qp_obj;
 }
 
+
+/**
+ * Query QP using DevX API.
+ * Currently supports only force loop-back QP.
+ *
+ * @param[in] qp
+ *   Pointer to QP object structure.
+ * @param [in] qp_st_mod_op
+ *   The QP state modification operation.
+ * @param [in] remote_qp_id
+ *   The remote QP ID for MLX5_CMD_OP_INIT2RTR_QP operation.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+RTE_EXPORT_INTERNAL_SYMBOL(mlx5_devx_cmd_query_qp_state)
+int
+mlx5_devx_cmd_query_qp_state(struct mlx5_devx_obj *qp,
+			      uint32_t remote_qp_id)
+{
+	uint32_t in[MLX5_ST_SZ_DW(query_qp_in)] = {0};
+	uint32_t out[MLX5_ST_SZ_DW(query_qp_out)] = {0};
+	int ret;
+
+	memset(&in, 0, sizeof(in));
+	memset(&out, 0, sizeof(out));
+	MLX5_SET(query_qp_in, &in, opcode, MLX5_CMD_OP_QUERY_QP);
+	MLX5_SET(query_qp_in, &in, op_mod, 0x0);
+	MLX5_SET(query_qp_in, &in, qpn, remote_qp_id);
+	ret = mlx5_glue->devx_obj_query(qp->obj, &in, sizeof(in), &out, sizeof(out));
+	if (ret) {
+		DRV_LOG(ERR, "Failed to modify QP using DevX.");
+		rte_errno = errno;
+		return -rte_errno;
+	}
+	void *qpc = MLX5_ADDR_OF(query_qp_out, out, qpc);
+	int st = MLX5_GET(qpc, qpc, state);
+	return ret;
+}
+
+
 /**
  * Modify QP using DevX API.
  * Currently supports only force loop-back QP.
