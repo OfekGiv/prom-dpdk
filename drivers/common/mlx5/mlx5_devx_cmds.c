@@ -2737,6 +2737,9 @@ mlx5_devx_cmd_query_qp_state(struct mlx5_devx_obj *qp,
 	}
 	void *qpc = MLX5_ADDR_OF(query_qp_out, out, qpc);
 	int st = MLX5_GET(qpc, qpc, state);
+	uint64_t dbr_addr = MLX5_GET64(qpc, qpc, dbr_addr);
+	int dbr_umem_valid = MLX5_GET(qpc, qpc, dbr_umem_valid);
+	int dbr_umem_id = MLX5_GET(qpc, qpc, dbr_umem_id);
 	return ret;
 }
 
