@@ -3801,5 +3801,8 @@ int mlx5_qp_release(struct rte_eth_dev *dev, uint16_t idx);
 struct mlx5_qp_ctrl * mlx5_qp_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc, unsigned int socket, const struct rte_eth_txconf *conf);
 int mlx5_qp_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc, unsigned int socket, const struct rte_eth_txconf *conf);
 void mlx5_qp_queue_release(struct rte_eth_dev *dev, uint16_t qid);
+static int qp_txq_uar_init_secondary(struct mlx5_qp_ctrl *qp_ctrl, int fd);
+int mlx5_qp_tx_uar_init_secondary(struct rte_eth_dev *dev, int fd);
+static void qp_txq_uar_uninit_secondary(struct mlx5_qp_ctrl *qp_ctrl);
 
 #endif /* RTE_PMD_MLX5_QP_H_ */

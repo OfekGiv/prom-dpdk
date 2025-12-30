@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <rte_eal_paging.h>
 
 #include <ethdev_driver.h>
 #include "mlx5.h"
@@ -1096,4 +1097,124 @@ mlx5_qp_tx_handle_completion(struct mlx5_qp_data *__rte_restrict qp_txq,
 	}
 }
 
+
+/**
+ * Remap UAR register of a Tx queue for secondary process.
+ *
+ * Remapped address is stored at the table in the process private structure of
+ * the device, indexed by queue index.
+ *
+ * @param txq_ctrl
+ *   Pointer to Tx queue control structure.
+ * @param fd
+ *   Verbs file descriptor to map UAR pages.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+static int
+qp_txq_uar_init_secondary(struct mlx5_qp_ctrl *qp_ctrl, int fd)
+{
+	struct mlx5_priv *priv = qp_ctrl->priv;
+	struct mlx5_proc_priv *ppriv = MLX5_PROC_PRIV(PORT_ID(priv));
+	struct mlx5_proc_priv *primary_ppriv = priv->sh->pppriv;
+	struct mlx5_qp_data *qp = &qp_ctrl->qp;
+	void *addr;
+	uintptr_t uar_va;
+	uintptr_t offset;
+	const size_t page_size = rte_mem_page_size();
+	if (page_size == (size_t)-1) {
+		DRV_LOG(ERR, "Failed to get mem page size");
+		rte_errno = ENOMEM;
+		return -rte_errno;
+	}
+
+	MLX5_ASSERT(ppriv);
+	/*
+	 * As rdma-core, UARs are mapped in size of OS page
+	 * size. Ref to libmlx5 function: mlx5_init_context()
+	 */
+	uar_va = (uintptr_t)primary_ppriv->uar_table[qp->qp_idx].db;
+	offset = uar_va & (page_size - 1); /* Offset in page. */
+	addr = rte_mem_map(NULL, page_size, RTE_PROT_WRITE, RTE_MAP_SHARED,
+			   fd, qp_ctrl->uar_mmap_offset);
+	if (!addr) {
+		DRV_LOG(ERR, "Port %u mmap failed for BF reg of txq %u.",
+			qp->port_id, qp->qp_idx);
+		rte_errno = ENXIO;
+		return -rte_errno;
+	}
+	addr = RTE_PTR_ADD(addr, offset);
+	ppriv->uar_table[qp->qp_idx].db = addr;
+#ifndef RTE_ARCH_64
+	ppriv->uar_table[txq->idx].sl_p =
+			primary_ppriv->uar_table[txq->idx].sl_p;
+#endif
+	return 0;
+}
+
+/**
+ * Initialize Tx UAR registers for secondary process.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param fd
+ *   Verbs file descriptor to map UAR pages.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+int
+mlx5_qp_tx_uar_init_secondary(struct rte_eth_dev *dev, int fd)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_qp_data *qp;
+	struct mlx5_qp_ctrl *qp_ctrl;
+	unsigned int i;
+	int ret;
+
+	MLX5_ASSERT(rte_eal_process_type() == RTE_PROC_SECONDARY);
+	for (i = 0; i != priv->txqs_n; ++i) {
+		if (!(*priv->txqs)[i])
+			continue;
+		qp = (*priv->qps)[i];
+		qp_ctrl = container_of(qp, struct mlx5_qp_ctrl, qp);
+		MLX5_ASSERT(qp->qp_idx == (uint16_t)i);
+		ret = qp_txq_uar_init_secondary(qp_ctrl, fd);
+		if (ret)
+			goto error;
+	}
+	return 0;
+error:
+	/* Rollback. */
+	do {
+		if (!(*priv->qps)[i])
+			continue;
+		qp = (*priv->qps)[i];
+		qp_ctrl = container_of(qp, struct mlx5_qp_ctrl, qp);
+		qp_txq_uar_uninit_secondary(qp_ctrl);
+	} while (i--);
+	return -rte_errno;
+}
+
+/**
+ * Unmap UAR register of a Tx queue for secondary process.
+ *
+ * @param txq_ctrl
+ *   Pointer to Tx queue control structure.
+ */
+static void
+qp_txq_uar_uninit_secondary(struct mlx5_qp_ctrl *qp_ctrl)
+{
+	struct mlx5_proc_priv *ppriv = MLX5_PROC_PRIV(PORT_ID(qp_ctrl->priv));
+	void *addr;
+	const size_t page_size = rte_mem_page_size();
+	if (page_size == (size_t)-1) {
+		DRV_LOG(ERR, "Failed to get mem page size");
+		rte_errno = ENOMEM;
+	}
+
+	addr = ppriv->uar_table[qp_ctrl->qp.qp_idx].db;
+	rte_mem_unmap(RTE_PTR_ALIGN_FLOOR(addr, page_size), page_size);
+}
 

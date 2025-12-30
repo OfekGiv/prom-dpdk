@@ -50,6 +50,7 @@
 #include "mlx5_verbs.h"
 #include "mlx5_nl.h"
 #include "mlx5_devx.h"
+#include "mlx5_qp.h"
 
 #ifndef HAVE_IBV_MLX5_MOD_MPW
 #define MLX5DV_CONTEXT_FLAGS_MPW_ALLOWED (1 << 2)
@@ -1236,7 +1237,8 @@ mlx5_dev_spawn(struct rte_device *dpdk_dev,
 		if (fd < 0)
 			goto err_secondary;
 		/* Remap UAR for Tx queues. */
-		err = mlx5_tx_uar_init_secondary(eth_dev, fd);
+		//err = mlx5_tx_uar_init_secondary(eth_dev, fd);
+		err = mlx5_qp_tx_uar_init_secondary(eth_dev, fd);
 		close(fd);
 		if (err)
 			goto err_secondary;
