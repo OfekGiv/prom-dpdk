@@ -587,6 +587,11 @@ struct mlx5_devx_qp_attr {
 	uint32_t multi_user_qp_type:2;
 	uint32_t multi_user_group_size:8;
 	uint32_t remote_qpn_or_multi_user_master_qp:24;
+	uint32_t q_off;
+	void *umem;
+	void *umem_obj;
+	uint32_t q_len;
+	uint32_t db_off;
 };
 
 struct mlx5_devx_virtio_q_couners_attr {

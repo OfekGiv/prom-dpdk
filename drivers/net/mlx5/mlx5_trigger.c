@@ -1777,13 +1777,15 @@ mlx5_traffic_enable_hws(struct rte_eth_dev *dev)
 		if (mlx5_flow_hw_create_tx_default_mreg_copy_flow(dev))
 			goto error;
 	}
-	for (i = 0; i < priv->txqs_n; ++i) {
-		struct mlx5_txq_ctrl *txq = mlx5_txq_get(dev, i);
+	for (i = 0; i < priv->qps_n; ++i) {
+		//struct mlx5_txq_ctrl *txq = mlx5_txq_get(dev, i);
+		struct mlx5_qp_ctrl *qp = mlx5_qp_get(dev, i);
 		uint32_t queue;
 
-		if (!txq)
+		if (!qp)
 			continue;
-		queue = mlx5_txq_get_sqn(txq);
+		//queue = mlx5_txq_get_sqn(txq);
+		queue = qp->obj->qp_obj.qp->id;
 		if ((priv->representor || priv->master) &&
 		    config->dv_esw_en &&
 		    config->fdb_def_rule) {
@@ -1882,11 +1884,13 @@ mlx5_traffic_enable(struct rte_eth_dev *dev)
 	 * isolation mode. Or else all the packets to be sent will be sent
 	 * out directly without the TX flow actions, e.g. encapsulation.
 	 */
-	for (i = 0; i != priv->txqs_n; ++i) {
-		struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, i);
-		if (!txq_ctrl)
+	for (i = 0; i != priv->qps_n; ++i) {
+		//struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, i);
+		struct mlx5_qp_ctrl *qp_ctrl = mlx5_qp_get(dev, i);
+		if (!qp_ctrl)
 			continue;
 		/* Only Tx implicit mode requires the default Tx flow. */
+		/*
 		if (txq_ctrl->is_hairpin &&
 		    txq_ctrl->hairpin_conf.tx_explicit == 0 &&
 		    txq_ctrl->hairpin_conf.peers[0].port ==
@@ -1898,8 +1902,10 @@ mlx5_traffic_enable(struct rte_eth_dev *dev)
 				goto error;
 			}
 		}
+		*/
 		if (priv->sh->config.dv_esw_en) {
-			uint32_t q = mlx5_txq_get_sqn(txq_ctrl);
+			//uint32_t q = mlx5_txq_get_sqn(txq_ctrl);
+			uint32_t q = qp_ctrl->obj->qp_obj.qp->id;
 
 			if (mlx5_flow_create_devx_sq_miss_flow(dev, q) == 0) {
 				mlx5_txq_release(dev, i);

@@ -1804,12 +1804,14 @@ struct mlx5_qp_obj {
 	struct mlx5_devx_cq rq_cq_obj; /* DevX recv CQ */
 
 	/* WQ descriptors */
+	/*
 	struct {
 		void *wqes;
 		uint32_t log_wq_n;
 		uint32_t stride;
 		volatile uint32_t *db_rec;
 	} sq_wq, rq_wq;
+*/
 
 	volatile uint32_t *qp_db_rec; /* DB record array for SQ/RQ */
 };

@@ -2283,14 +2283,14 @@ mlx5_proc_priv_init(struct rte_eth_dev *dev)
 	 * registers for Tx queues are stored in the table.
 	 */
 	ppriv_size = sizeof(struct mlx5_proc_priv) +
-		     priv->txqs_n * sizeof(struct mlx5_uar_data);
+		     priv->qps_n * sizeof(struct mlx5_uar_data);
 	ppriv = mlx5_malloc_numa_tolerant(MLX5_MEM_RTE | MLX5_MEM_ZERO, ppriv_size,
 					  RTE_CACHE_LINE_SIZE, dev->device->numa_node);
 	if (!ppriv) {
 		rte_errno = ENOMEM;
 		return -rte_errno;
 	}
-	ppriv->uar_table_sz = priv->txqs_n;
+	ppriv->uar_table_sz = priv->qps_n;
 	dev->process_private = ppriv;
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
 		priv->sh->pppriv = ppriv;

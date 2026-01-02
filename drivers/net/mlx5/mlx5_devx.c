@@ -1735,6 +1735,16 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	qp_attr.user_index = idx;
 	qp_attr.num_of_receive_wqes = 0;
 	qp_attr.cqn = qp_obj->sq_cq_obj.cq->id;
+
+	/* Create Send Queue object with DevX. */
+	if (priv->sh->config.txq_mem_algn) {
+		qp_attr.umem = priv->consec_tx_mem.umem;
+		qp_attr.umem_obj = priv->consec_tx_mem.umem_obj;
+		qp_attr.q_off = priv->consec_tx_mem.sq_cur_off;
+		qp_attr.db_off = db_start + (2 * idx) * MLX5_DBR_SIZE;
+		qp_attr.q_len = qp_data->sq_mem_len;
+	}
+
 	ret = mlx5_devx_qp_create(priv->sh->cdev->ctx, &qp_obj->qp_obj,
 			   		wqe_n, &qp_attr, sh->numa_node);
 	if (ret) {

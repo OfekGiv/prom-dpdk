@@ -428,6 +428,7 @@ mlx5_devx_qp_create(void *ctx, struct mlx5_devx_qp *qp_obj, uint32_t queue_size,
 	struct mlx5_devx_obj *qp = NULL;
 	struct mlx5dv_devx_umem *umem_obj = NULL;
 	void *umem_buf = NULL;
+	uint32_t umem_id;
 	size_t alignment = MLX5_WQE_BUF_ALIGNMENT;
 	uint32_t umem_size, umem_dbrec;
 	int ret;
@@ -484,7 +485,7 @@ mlx5_devx_qp_create(void *ctx, struct mlx5_devx_qp *qp_obj, uint32_t queue_size,
 
 		memset(qp_obj, 0, sizeof(*qp_obj));
 		qp_obj->umem_buf = umem_buf;
-		qp_obj->umem_obj = umem_obj;
+		qp_obj->umem_obj = attr->umem_obj;
 		qp_obj->qp = qp;
 		qp_obj->db_rec = RTE_PTR_ADD(qp_obj->umem_buf, umem_dbrec);
 		return 0;
@@ -499,6 +500,10 @@ mlx5_devx_qp_create(void *ctx, struct mlx5_devx_qp *qp_obj, uint32_t queue_size,
 	umem_size = queue_size;
 	umem_dbrec = RTE_ALIGN(umem_size, MLX5_DBR_SIZE);
 	umem_size += MLX5_DBR_SIZE;
+	umem_buf = attr->umem;
+	umem_id = mlx5_os_get_umem_id(attr->umem_obj);
+	umem_obj = attr->umem_obj;
+	/*
 	umem_buf = mlx5_malloc(MLX5_MEM_RTE | MLX5_MEM_ZERO, umem_size,
 			       alignment, socket);
 	if (!umem_buf) {
@@ -506,7 +511,9 @@ mlx5_devx_qp_create(void *ctx, struct mlx5_devx_qp *qp_obj, uint32_t queue_size,
 		rte_errno = ENOMEM;
 		return -rte_errno;
 	}
+	*/
 	/* Register allocated buffer in user space with DevX. */
+	/*
 	umem_obj = mlx5_os_umem_reg(ctx, (void *)(uintptr_t)umem_buf, umem_size,
 				    IBV_ACCESS_LOCAL_WRITE);
 	if (!umem_obj) {
@@ -514,8 +521,10 @@ mlx5_devx_qp_create(void *ctx, struct mlx5_devx_qp *qp_obj, uint32_t queue_size,
 		rte_errno = errno;
 		goto error;
 	}
+	*/
 	/* Fill attributes for SQ object creation. */
-	attr->wq_umem_id = mlx5_os_get_umem_id(umem_obj);
+	attr->wq_umem_id = umem_id;
+	//attr->wq_umem_id = mlx5_os_get_umem_id(umem_obj);
 	attr->wq_umem_offset = 0;
 	attr->dbr_umem_valid = 1;
 	attr->dbr_umem_id = attr->wq_umem_id;
@@ -531,7 +540,7 @@ mlx5_devx_qp_create(void *ctx, struct mlx5_devx_qp *qp_obj, uint32_t queue_size,
 	qp_obj->umem_buf = umem_buf;
 	qp_obj->umem_obj = umem_obj;
 	qp_obj->qp = qp;
-	qp_obj->db_rec = RTE_PTR_ADD(qp_obj->umem_buf, umem_dbrec);
+	qp_obj->db_rec = RTE_PTR_ADD(umem_buf, attr->db_off);
 	return 0;
 error:
 	ret = rte_errno;
