@@ -528,7 +528,7 @@ mlx5_devx_qp_create(void *ctx, struct mlx5_devx_qp *qp_obj, uint32_t queue_size,
 	attr->wq_umem_offset = 0;
 	attr->dbr_umem_valid = 1;
 	attr->dbr_umem_id = attr->wq_umem_id;
-	attr->dbr_address = umem_dbrec;
+	attr->dbr_address = attr->db_off;
 	attr->log_page_size = MLX5_LOG_PAGE_SIZE;
 	/* Create send queue object with DevX. */
 	qp = mlx5_devx_cmd_create_qp(ctx, attr);
