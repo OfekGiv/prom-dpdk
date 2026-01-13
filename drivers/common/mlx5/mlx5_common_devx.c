@@ -156,6 +156,7 @@ mlx5_devx_cq_create(void *ctx, struct mlx5_devx_cq *cq_obj, uint16_t log_desc_n,
 	attr->db_umem_id = umem_id;
 	attr->db_umem_offset = umem_dbrec;
 	attr->eqn = eqn;
+	attr->overrun_ignore = 1;
 	attr->log_cq_size = act_log_size;
 	attr->log_page_size = rte_log2_u32(page_size);
 	/* Create completion queue object with DevX. */

@@ -1647,6 +1647,7 @@ print_cq_status(struct mlx5_devx_obj *cq_obj)
 	int cq_uar_page = MLX5_GET(cqc, cqc, uar_page);
 	int cq_consumer_counter = MLX5_GET(cqc, cqc, consumer_counter);
 	int cq_producer_counter = MLX5_GET(cqc, cqc, producer_counter);
+	int cq_oi = MLX5_GET(cqc, cqc, oi);
 
 	printf("CQ status: \n");
 	printf("status 0x%x\n",cq_status);
@@ -1660,9 +1661,9 @@ print_cq_status(struct mlx5_devx_obj *cq_obj)
 	printf("uar_page 0x%x\n",cq_uar_page);
 	printf("consumer counter 0x%x\n",cq_consumer_counter);
 	printf("producer counter 0x%x\n",cq_producer_counter);
+	printf("overrun ignore %d\n",cq_oi);
 	printf("----------------------\n");
 }
-
 
 
 /**
@@ -1731,13 +1732,14 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 		goto error;
 	}
 
+	dump_mem_to_file("/homes/ofekdg/cq_memdump_init.bin", qp_obj->sq_cq_obj.umem_buf, (size_t)qp_obj->sq_cq_obj.db_rec - (size_t)qp_obj->sq_cq_obj.umem_buf);
 	print_cq_status(qp_obj->sq_cq_obj.cq);
 
 	qp_data->sq_cqe_n = log_desc_n;
 	qp_data->sq_cqe_s = cqe_n;
 	qp_data->sq_cqe_m = qp_data->cqe_s - 1;
 	qp_data->sq_cqes = qp_obj->sq_cq_obj.cqes;
-	qp_data->sq_cq_ci = 0;
+	qp_data->sq_cq_ci = 1;
 	qp_data->sq_cq_pi = 0;
 	qp_data->sq_cq_db = qp_obj->sq_cq_obj.db_rec;
 	*qp_data->sq_cq_db = 0;

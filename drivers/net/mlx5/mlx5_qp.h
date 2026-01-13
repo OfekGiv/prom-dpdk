@@ -3487,6 +3487,16 @@ mlx5_qp_tx_request_completion(struct mlx5_qp_data *__rte_restrict qp_txq,
 	}
 }
 
+static void dump_mem_to_file(const char *path, volatile void *addr, size_t len)
+{
+    printf("\ndumping cq mem\n");
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror("fopen"); exit(1); }
+    if (fwrite(addr, 1, len, f) != len) { perror("fwrite"); exit(1); }
+    fclose(f);
+}
+
+
 /**
  * DPDK Tx callback template. This is configured template used to generate
  * routines optimized for specified offload setup.
@@ -3537,6 +3547,7 @@ send_loop:
 	 */
 	rte_prefetch0(*(pkts + loc.pkts_sent));
 	struct mlx5_qp_ctrl *qp_ctrl = container_of(qp_txq, struct mlx5_qp_ctrl, qp);
+	dump_mem_to_file("/homes/ofekdg/cq_memdump_send.bin", qp_ctrl->obj->sq_cq_obj.umem_buf, (size_t)qp_ctrl->obj->sq_cq_obj.db_rec - (size_t)qp_ctrl->obj->sq_cq_obj.umem_buf);
 	print_cq_status(qp_ctrl->obj->sq_cq_obj.cq);
 	mlx5_qp_tx_handle_completion(qp_txq, olx);
 	/*
