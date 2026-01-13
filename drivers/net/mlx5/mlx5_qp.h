@@ -3536,6 +3536,8 @@ send_loop:
 	 * - doorbell the NIC about processed CQEs
 	 */
 	rte_prefetch0(*(pkts + loc.pkts_sent));
+	struct mlx5_qp_ctrl *qp_ctrl = container_of(qp_txq, struct mlx5_qp_ctrl, qp);
+	print_cq_status(qp_ctrl->obj->sq_cq_obj.cq);
 	mlx5_qp_tx_handle_completion(qp_txq, olx);
 	/*
 	 * Calculate the number of available resources - elts and WQEs.

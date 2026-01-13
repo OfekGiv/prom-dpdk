@@ -22,6 +22,7 @@
 #include "mlx5.h"
 #include "mlx5_common_os.h"
 #include "mlx5_driver_event.h"
+#include "mlx5_prm.h"
 #include "mlx5_qp.h"
 #include "mlx5_tx.h"
 #include "mlx5_rx.h"
@@ -1627,6 +1628,43 @@ mlx5_qp_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 	return ret;
 }
 */
+
+void
+print_cq_status(struct mlx5_devx_obj *cq_obj)
+{
+
+	uint32_t cq_out[MLX5_ST_SZ_DW(query_cq_out)] = {0};
+
+	mlx5_devx_cmd_query_cq(cq_obj, cq_out, sizeof(cq_out));
+	int cq_status = MLX5_GET(query_cq_out, &cq_out, status);
+	int cq_syndrome= MLX5_GET(query_cq_out, &cq_out, syndrome);
+	void *cqc = MLX5_ADDR_OF(query_cq_out, cq_out, cq_context);
+	int st = MLX5_GET(cqc, cqc, st);
+	int cstatus = MLX5_GET(cqc, cqc, status);
+	uint64_t cq_dbr_addr = MLX5_GET64(cqc, cqc, dbr_addr);
+	int cq_dbr_umem_valid = MLX5_GET(cqc, cqc, dbr_umem_valid);
+	int cq_dbr_umem_id = MLX5_GET(cqc, cqc, dbr_umem_id);
+	int cq_uar_page = MLX5_GET(cqc, cqc, uar_page);
+	int cq_consumer_counter = MLX5_GET(cqc, cqc, consumer_counter);
+	int cq_producer_counter = MLX5_GET(cqc, cqc, producer_counter);
+
+	printf("CQ status: \n");
+	printf("status 0x%x\n",cq_status);
+	printf("syndrome 0x%x\n",cq_syndrome);
+	printf("----------------------\n");
+	printf("st 0x%x\n",st);
+	printf("cstatus 0x%x\n",cstatus);
+	printf("dbr_addr 0x%08x\n",cq_dbr_addr);
+	printf("dbr_umem_valid 0x%x\n",cq_dbr_umem_valid);
+	printf("dbr_umrm_id 0x%x\n",cq_dbr_umem_id);
+	printf("uar_page 0x%x\n",cq_uar_page);
+	printf("consumer counter 0x%x\n",cq_consumer_counter);
+	printf("producer counter 0x%x\n",cq_producer_counter);
+	printf("----------------------\n");
+}
+
+
+
 /**
  * Create the QP DevX object
  *
@@ -1692,6 +1730,8 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 			dev->data->port_id, idx);
 		goto error;
 	}
+
+	print_cq_status(qp_obj->sq_cq_obj.cq);
 
 	qp_data->sq_cqe_n = log_desc_n;
 	qp_data->sq_cqe_s = cqe_n;

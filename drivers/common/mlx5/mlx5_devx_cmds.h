@@ -921,4 +921,7 @@ int
 mlx5_devx_cmd_query_lag(void *ctx,
 			struct mlx5_devx_lag_context *lag_ctx);
 
+void
+print_cq_status(struct mlx5_devx_obj *cq_obj);
+
 #endif /* RTE_PMD_MLX5_DEVX_CMDS_H_ */
