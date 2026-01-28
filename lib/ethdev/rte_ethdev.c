@@ -1655,7 +1655,8 @@ rte_eth_dev_configure(uint16_t port_id, uint16_t nb_rx_q, uint16_t nb_tx_q,
 	return 0;
 reset_queues:
 	eth_dev_rx_queue_config(dev, 0);
-	eth_dev_tx_queue_config(dev, 0);
+	eth_dev_qp_tx_queue_config(dev, 0);
+	//eth_dev_tx_queue_config(dev, 0);
 rollback:
 	memcpy(&dev->data->dev_conf, &orig_conf, sizeof(dev->data->dev_conf));
 	if (old_mtu != dev->data->mtu)

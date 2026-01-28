@@ -509,11 +509,11 @@ eth_dev_qp_tx_queue_config(struct rte_eth_dev *dev, uint16_t nb_queues)
 		}
 	} else if (dev->data->qps != NULL && nb_queues != 0) { /* re-configure */
 		for (i = nb_queues; i < old_nb_queues; i++)
-			eth_dev_txq_release(dev, i);
+			eth_dev_qp_txq_release(dev, i);
 
 	} else if (dev->data->qps != NULL && nb_queues == 0) {
 		for (i = nb_queues; i < old_nb_queues; i++)
-			eth_dev_txq_release(dev, i);
+			eth_dev_qp_txq_release(dev, i);
 
 		rte_free(dev->data->qps);
 		dev->data->qps = NULL;

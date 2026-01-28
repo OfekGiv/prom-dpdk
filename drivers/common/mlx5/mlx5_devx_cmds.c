@@ -2585,7 +2585,8 @@ mlx5_devx_cmd_create_qp(void *ctx,
 		return NULL;
 	}
 	MLX5_SET(create_qp_in, in, opcode, MLX5_CMD_OP_CREATE_QP);
-	MLX5_SET(qpc, qpc, st, MLX5_QP_ST_RC);
+	//MLX5_SET(qpc, qpc, st, MLX5_QP_ST_RC);
+	MLX5_SET(qpc, qpc, st, 0x9);
 	MLX5_SET(qpc, qpc, pd, attr->pd);
 	MLX5_SET(qpc, qpc, ts_format, attr->ts_format);
 	MLX5_SET(qpc, qpc, user_index, attr->user_index);
@@ -2735,11 +2736,30 @@ mlx5_devx_cmd_query_qp_state(struct mlx5_devx_obj *qp,
 		rte_errno = errno;
 		return -rte_errno;
 	}
+	int query_status = MLX5_GET(query_qp_out, out, status);
+	int query_syndrome = MLX5_GET(query_qp_out, out, syndrome);
 	void *qpc = MLX5_ADDR_OF(query_qp_out, out, qpc);
-	int st = MLX5_GET(qpc, qpc, state);
+	int state = MLX5_GET(qpc, qpc, state);
+	int st = MLX5_GET(qpc, qpc, st);
 	uint64_t dbr_addr = MLX5_GET64(qpc, qpc, dbr_addr);
 	int dbr_umem_valid = MLX5_GET(qpc, qpc, dbr_umem_valid);
 	int dbr_umem_id = MLX5_GET(qpc, qpc, dbr_umem_id);
+	int hw_sq_wqebb_coutner = MLX5_GET(qpc, qpc, hw_sq_wqebb_counter);
+	int sw_sq_wqebb_coutner = MLX5_GET(qpc, qpc, sw_sq_wqebb_counter);
+
+
+	printf("QP status: \n");
+	printf("status 0x%x\n",query_status);
+	printf("syndrome 0x%x\n",query_syndrome);
+	printf("----------------------\n");
+	printf("state 0x%x\n",state);
+	printf("st 0x%x\n",st);
+	printf("dbr_addr 0x%08x\n",dbr_addr);
+	printf("dbr_umem_valid 0x%x\n",dbr_umem_valid);
+	printf("dbr_umrm_id 0x%x\n",dbr_umem_id);
+	printf("hw_sq_wqebb_coutner 0x%x\n",hw_sq_wqebb_coutner);
+	printf("sw_sq_wqebb_coutner 0x%x\n",sw_sq_wqebb_coutner);
+	printf("----------------------\n");
 	return ret;
 }
 
@@ -2788,8 +2808,8 @@ mlx5_devx_cmd_modify_qp_state(struct mlx5_devx_obj *qp, uint32_t qp_st_mod_op,
 		MLX5_SET(rst2init_qp_in, &in, qpn, qp->id);
 		qpc = MLX5_ADDR_OF(rst2init_qp_in, &in, qpc);
 		MLX5_SET(qpc, qpc, primary_address_path.vhca_port_num, 1);
-		MLX5_SET(qpc, qpc, rre, 1);
-		MLX5_SET(qpc, qpc, rwe, 1);
+		//MLX5_SET(qpc, qpc, rre, 1);
+		//MLX5_SET(qpc, qpc, rwe, 1);
 		MLX5_SET(qpc, qpc, pm_state, MLX5_QP_PM_MIGRATED);
 		inlen = sizeof(in.rst2init);
 		outlen = sizeof(out.rst2init);
@@ -2797,12 +2817,13 @@ mlx5_devx_cmd_modify_qp_state(struct mlx5_devx_obj *qp, uint32_t qp_st_mod_op,
 	case MLX5_CMD_OP_INIT2RTR_QP:
 		MLX5_SET(init2rtr_qp_in, &in, qpn, qp->id);
 		qpc = MLX5_ADDR_OF(init2rtr_qp_in, &in, qpc);
-		MLX5_SET(qpc, qpc, primary_address_path.fl, 1);
-		MLX5_SET(qpc, qpc, primary_address_path.vhca_port_num, 1);
-		MLX5_SET(qpc, qpc, mtu, 1);
+		//MLX5_SET(qpc, qpc, primary_address_path.fl, 1);
+		//MLX5_SET(qpc, qpc, primary_address_path.vhca_port_num, 1);
+		//MLX5_SET(qpc, qpc, mtu, 1);
+		MLX5_SET(qpc, qpc, mtu, 0x7);
 		MLX5_SET(qpc, qpc, log_msg_max, 30);
-		MLX5_SET(qpc, qpc, remote_qpn, remote_qp_id);
-		MLX5_SET(qpc, qpc, min_rnr_nak, 0);
+		//MLX5_SET(qpc, qpc, remote_qpn, remote_qp_id);
+		//MLX5_SET(qpc, qpc, min_rnr_nak, 0);
 		inlen = sizeof(in.init2rtr);
 		outlen = sizeof(out.init2rtr);
 		break;
@@ -2829,7 +2850,10 @@ mlx5_devx_cmd_modify_qp_state(struct mlx5_devx_obj *qp, uint32_t qp_st_mod_op,
 	}
 	ret = mlx5_glue->devx_obj_modify(qp->obj, &in, inlen, &out, outlen);
 	if (ret) {
+		int syndrome = MLX5_GET(rst2init_qp_out,out.rst2init,syndrome);
+		int status = MLX5_GET(rst2init_qp_out,out.rst2init,status);
 		DRV_LOG(ERR, "Failed to modify QP using DevX.");
+		printf("status = 0x%x | syndrome = 0x%x\n",status, syndrome);
 		rte_errno = errno;
 		return -rte_errno;
 	}

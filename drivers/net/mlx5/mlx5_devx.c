@@ -1809,7 +1809,7 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	qp_data->sq_wqe_thres = qp_data->sq_wqe_s / MLX5_TX_COMP_THRESH_INLINE_DIV;
 	qp_data->sq_db = &qp_obj->qp_obj.db_rec[MLX5_SND_DBR];
 	*qp_data->sq_db = 0;
-	//qp_data->qp_num_8s = qp_obj->sq_obj.sq->id << 8;
+	qp_data->qp_num_8s = qp_obj->qp_obj.qp->id << 8;
 	qp_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
 	qp_data->db_nc = sh->tx_uar.dbnc;
 	qp_data->wait_on_time = !!(!sh->config.tx_pp &&
@@ -1822,7 +1822,7 @@ mlx5_qp_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	if (ret) {
 		rte_errno = errno;
 		DRV_LOG(ERR,
-			"Port %u QP Tx queue %u SQ state to RST2RTS failed.",
+			"Port %u QP Tx queue %u QP state to RTS failed.",
 			dev->data->port_id, idx);
 		goto error;
 	}

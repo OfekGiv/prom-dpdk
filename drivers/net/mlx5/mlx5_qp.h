@@ -3549,6 +3549,7 @@ send_loop:
 	struct mlx5_qp_ctrl *qp_ctrl = container_of(qp_txq, struct mlx5_qp_ctrl, qp);
 	dump_mem_to_file("/homes/ofekdg/cq_memdump_send.bin", qp_ctrl->obj->sq_cq_obj.umem_buf, (size_t)qp_ctrl->obj->sq_cq_obj.db_rec - (size_t)qp_ctrl->obj->sq_cq_obj.umem_buf);
 	print_cq_status(qp_ctrl->obj->sq_cq_obj.cq);
+	mlx5_devx_cmd_query_qp_state(qp_ctrl->obj->qp_obj.qp,qp_ctrl->obj->qp_obj.qp->id);
 	mlx5_qp_tx_handle_completion(qp_txq, olx);
 	/*
 	 * Calculate the number of available resources - elts and WQEs.
