@@ -41,6 +41,10 @@
 static struct rte_lpm *ipv4_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 static struct rte_lpm6 *ipv6_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 
+/* MODIFICATION STARTS */
+extern struct rte_mempool *pktmbuf_pool;
+/* MODIFICATION ENDS */
+
 /* Performing LPM-based lookups. 8< */
 static inline uint16_t
 lpm_get_ipv4_dst_port(const struct rte_ipv4_hdr *ipv4_hdr,
@@ -182,6 +186,7 @@ lpm_main_loop(__rte_unused void *dummy)
 		/*
 		 * TX burst queue drain
 		 */
+		i = 0;
 		diff_tsc = cur_tsc - prev_tsc;
 		if (unlikely(diff_tsc > drain_tsc)) {
 
@@ -201,14 +206,43 @@ lpm_main_loop(__rte_unused void *dummy)
 		/*
 		 * Read packet from RX queues
 		 */
-		for (i = 0; i < n_rx_q; ++i) {
-			portid = qconf->rx_queue_list[i].port_id;
-			queueid = qconf->rx_queue_list[i].queue_id;
-			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
-				rx_burst_size);
-			if (nb_rx == 0)
-				continue;
+		/* MODIFICATION STARTS */
+		// for (i = 0; i < n_rx_q; ++i) {
+		// 	portid = qconf->rx_queue_list[i].port_id;
+		// 	queueid = qconf->rx_queue_list[i].queue_id;
+		// 	nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
+		// 		rx_burst_size);
+		// 	if (nb_rx == 0)
+		// 		continue;
+		uint8_t pkt_bytes[] = {
+			0xd4,0xc3,0xb2,0xa1,0x02,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x01,0x00,0x00,0x00,0xe9,0x71,
+			0x7a,0x69,0x1d,0x24,0x0e,0x00,0x3c,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0xe8,0xeb,0xd3,0x98,0x25,0x8d,0x0c,0x42,0xa1,0x1d,0x3a,0xfa,
+			0x08,0x00,0x45,0x00,0x00,0x2e,0x2f,0xf2,0x00,0x00,0x40,0x06,0x00,0x00,0x03,0x03,0x03,0x03,0x04,0x03,0x03,0x02,0x04,0xd2,0x16,0x2e,
+			0x00,0x01,0x23,0x78,0x00,0x01,0x23,0x90,0x50,0x10,0x20,0x00,0x00,0x00,'N','u','m',':',0x00,0x00,0x00,0x00,
+		};
+		const uint16_t pkt_len = 100;
+		for (i = 0; i < 10; i++) {
+			
+			pkt_bytes[96] = i + 0x30;
+			struct rte_mbuf *m = rte_pktmbuf_alloc(pktmbuf_pool);
+			if (m == NULL) {
+				printf("rte_pktmbuf_alloc Failed\n");
+				exit(-1);
+			}
 
+			uint8_t *dst = rte_pktmbuf_append(m, pkt_len);
+			if (dst == NULL) {
+				rte_pktmbuf_free(m);
+				printf("rte_pktmbuf_append Failed\n");
+				exit(-1);
+			}
+			portid = qconf->rx_queue_list[0].port_id;
+			rte_memcpy(dst, pkt_bytes, pkt_len);
+
+			pkts_burst[0] = m;
+			nb_rx = 1;
+
+		/* MODIFICATION ENDS */
 #if defined RTE_ARCH_X86 || defined __ARM_NEON \
 			 || defined RTE_ARCH_PPC_64
 			l3fwd_lpm_send_packets(nb_rx, pkts_burst,

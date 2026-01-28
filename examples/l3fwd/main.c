@@ -145,7 +145,8 @@ uint32_t max_pkt_len;
 #ifdef RTE_LIB_EVENTDEV
 static struct rte_mempool *vector_pool[RTE_MAX_ETHPORTS];
 #endif
-static struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
+//static struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
+struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
 static uint8_t lkp_per_socket[NB_SOCKETS];
 
 struct l3fwd_lkp_mode {
