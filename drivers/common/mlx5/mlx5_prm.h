@@ -3217,12 +3217,13 @@ struct mlx5_ifc_sqc_bits {
 	u8 reserved_at_18[0x2];
 	u8 ts_format[0x02];
 	u8 reserved_at_1c[0x4];
-	u8 reserved_at_20[0x8];
+	u8 reserved_at_22[0x6];
+	u8 multi_user_qp_type[0x2];
 	u8 user_index[0x18];
-	u8 reserved_at_40[0x8];
+	u8 multi_user_group_size[0x8];
 	u8 cqn[0x18];
 	u8 reserved_at_60[0x8];
-	u8 hairpin_peer_rq[0x18];
+	u8 hairpin_peer_rq_or_multi_user_master_qp[0x18];
 	u8 reserved_at_80[0x10];
 	u8 hairpin_peer_vhca[0x10];
 	u8 reserved_at_a0[0x50];
