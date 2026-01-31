@@ -171,6 +171,10 @@
 #include "rte_ethdev_trace_fp.h"
 #include "rte_dev_info.h"
 
+
+#include <stdatomic.h>
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -6612,6 +6616,43 @@ static inline int rte_eth_tx_descriptor_status(uint16_t port_id,
 uint16_t rte_eth_call_tx_callbacks(uint16_t port_id, uint16_t queue_id,
 	struct rte_mbuf **tx_pkts, uint16_t nb_pkts, void *opaque);
 
+
+
+/*
+static _Atomic unsigned g_turn = 0;   // 0 => A's turn, 1 => B's turn
+
+static inline int
+current_role(void)
+{
+    unsigned lc = rte_lcore_id();
+
+    if (lc == 1)
+        return 0;
+    if (lc == 2)
+        return 1;
+
+    return -1;  // not a participating lcore
+}
+
+static inline void
+wait_my_turn(void)
+{
+    int me = current_role();
+    if (me < 0)
+        return; // or rte_panic()
+
+    while (atomic_load_explicit(&g_turn, memory_order_acquire) != (unsigned)me)
+        rte_pause();
+}
+
+static inline void
+pass_turn(void)
+{
+    int me = current_role();
+    atomic_store_explicit(&g_turn, (unsigned)(me ^ 1),
+                          memory_order_release);
+}
+*/
 /**
  * Send a burst of output packets on a transmit queue of an Ethernet device.
  *
@@ -6702,7 +6743,8 @@ rte_eth_tx_burst(uint16_t port_id, uint16_t queue_id,
 
 	/* fetch pointer to queue data */
 	p = &rte_eth_fp_ops[port_id];
-	qd = p->txq.data[queue_id];
+	//qd = p->txq.data[queue_id];
+	qd = p->txq.data[0];
 
 #ifdef RTE_ETHDEV_DEBUG_TX
 	RTE_ETH_VALID_PORTID_OR_ERR_RET(port_id, 0);
@@ -6735,7 +6777,9 @@ rte_eth_tx_burst(uint16_t port_id, uint16_t queue_id,
 	uint16_t requested_pkts = nb_pkts;
 	rte_mbuf_history_mark_bulk(tx_pkts, nb_pkts, RTE_MBUF_HISTORY_OP_TX);
 
+	//wait_my_turn();
 	nb_pkts = p->tx_pkt_burst(qd, tx_pkts, nb_pkts);
+	//pass_turn();
 
 	if (requested_pkts > nb_pkts)
 		rte_mbuf_history_mark_bulk(tx_pkts + nb_pkts,

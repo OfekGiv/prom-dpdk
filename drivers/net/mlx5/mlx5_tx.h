@@ -2678,6 +2678,42 @@ mlx5_tx_idone_empw(struct mlx5_txq_data *__rte_restrict txq,
 	loc->wqe_last = wqem;
 }
 
+
+
+static _Atomic unsigned g_turn = 0;   // 0 => A's turn, 1 => B's turn
+
+static inline int
+current_role(void)
+{
+    unsigned lc = rte_lcore_id();
+
+    if (lc == 1)
+        return 0;
+    if (lc == 2)
+        return 1;
+
+    return -1;  // not a participating lcore
+}
+
+static inline void
+wait_my_turn(void)
+{
+    int me = current_role();
+    if (me < 0)
+        return; // or rte_panic()
+
+    while (atomic_load_explicit(&g_turn, memory_order_acquire) != (unsigned)me)
+        rte_pause();
+}
+
+static inline void
+pass_turn(void)
+{
+    int me = current_role();
+    atomic_store_explicit(&g_turn, (unsigned)(me ^ 1),
+                          memory_order_release);
+}
+
 /**
  * The set of Tx burst functions for single-segment packets without TSO
  * and with Multi-Packet Writing feature support.
@@ -2740,6 +2776,7 @@ mlx5_tx_burst_empw_simple(struct mlx5_txq_data *__rte_restrict txq,
 	pkts += loc->pkts_sent + 1;
 	pkts_n -= loc->pkts_sent;
 	for (;;) {
+		wait_my_turn();
 		struct mlx5_wqe_dseg *__rte_restrict dseg;
 		struct mlx5_wqe_eseg *__rte_restrict eseg;
 		enum mlx5_txcmp_code ret;
@@ -2890,6 +2927,7 @@ next_empw:
 		if (unlikely(ret != MLX5_TXCMP_CODE_EMPW))
 			return ret;
 		/* Continue sending eMPW batches. */
+		pass_turn();
 	}
 	MLX5_ASSERT(false);
 }
