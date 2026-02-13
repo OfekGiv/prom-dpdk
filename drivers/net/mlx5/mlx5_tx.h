@@ -2776,7 +2776,7 @@ mlx5_tx_burst_empw_simple(struct mlx5_txq_data *__rte_restrict txq,
 	pkts += loc->pkts_sent + 1;
 	pkts_n -= loc->pkts_sent;
 	for (;;) {
-		wait_my_turn();
+		//wait_my_turn();
 		struct mlx5_wqe_dseg *__rte_restrict dseg;
 		struct mlx5_wqe_eseg *__rte_restrict eseg;
 		enum mlx5_txcmp_code ret;
@@ -2927,7 +2927,7 @@ next_empw:
 		if (unlikely(ret != MLX5_TXCMP_CODE_EMPW))
 			return ret;
 		/* Continue sending eMPW batches. */
-		pass_turn();
+		//pass_turn();
 	}
 	MLX5_ASSERT(false);
 }

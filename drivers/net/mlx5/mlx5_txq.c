@@ -1183,8 +1183,17 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	}
 	if (priv->sh->config.txq_mem_algn != 0) {
 		log_desc_n = log2above(wqebb_cnt);
-		tmpl->txq.sq_mem_len = mlx5_txq_wq_mem_length(log_desc_n);
-		tmpl->txq.cq_mem_len = mlx5_txq_cq_mem_length(dev, tmpl);
+
+		// Calcaulate SQ length for single-user SQ or master SQ
+		if (MULTI_USER_SQ_EN == 0 || idx == 0) {
+			tmpl->txq.sq_mem_len = mlx5_txq_wq_mem_length(log_desc_n);
+			tmpl->txq.cq_mem_len = mlx5_txq_cq_mem_length(dev, tmpl);
+		}
+		// Slave SQ length = 0
+		else {
+			tmpl->txq.sq_mem_len = 0;
+			tmpl->txq.cq_mem_len = 0;
+		}
 		DRV_LOG(DEBUG, "Port %u TxQ %u WQ length %u, CQ length %u before align.",
 			dev->data->port_id, idx, tmpl->txq.sq_mem_len, tmpl->txq.cq_mem_len);
 		priv->consec_tx_mem.sq_total_size += tmpl->txq.sq_mem_len;

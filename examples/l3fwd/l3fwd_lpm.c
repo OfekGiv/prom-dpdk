@@ -208,13 +208,15 @@ lpm_main_loop(__rte_unused void *dummy)
 		 * Read packet from RX queues
 		 */
 		/* MODIFICATION STARTS */
-		// for (i = 0; i < n_rx_q; ++i) {
-		// 	portid = qconf->rx_queue_list[i].port_id;
-		// 	queueid = qconf->rx_queue_list[i].queue_id;
-		// 	nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
-		// 		rx_burst_size);
-		// 	if (nb_rx == 0)
-		// 		continue;
+		 //for (i = 0; i < n_rx_q; ++i) {
+		 //	portid = qconf->rx_queue_list[i].port_id;
+		 //	queueid = qconf->rx_queue_list[i].queue_id;
+		 //	nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
+		 //		rx_burst_size);
+		 //	if (nb_rx == 0)
+		 //		continue;
+
+
 		uint8_t pkt_bytes[] = {
 			0xd4,0xc3,0xb2,0xa1,0x02,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x01,0x00,0x00,0x00,0xe9,0x71,
 			0x7a,0x69,0x1d,0x24,0x0e,0x00,0x3c,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0xe8,0xeb,0xd3,0x98,0x25,0x8d,0x0c,0x42,0xa1,0x1d,0x3a,0xfa,
@@ -222,8 +224,9 @@ lpm_main_loop(__rte_unused void *dummy)
 			0x00,0x01,0x23,0x78,0x00,0x01,0x23,0x90,0x50,0x10,0x20,0x00,0x00,0x00,0x00,0x00,'N','u','m',':',0x00,0x00,
 		};
 		const uint16_t pkt_len = 100;
-		if (send_flag == 0) {
-			for (i = 0; i < 5; i++) {
+
+		if (send_flag == 0 && lcore_id == 1) {
+			for (i = 0; i < 2; i++) {
 				for (int j = 0; j < 32; j++) {
 					pkt_bytes[99] = 32 * (2*i + lcore_id - 1) + j;
 					struct rte_mbuf *m = rte_pktmbuf_alloc(pktmbuf_pool);
@@ -253,8 +256,10 @@ lpm_main_loop(__rte_unused void *dummy)
 					l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
 				   portid, qconf);
 #endif /* X86 */
+
 				}
 			}
+
 			send_flag = 1;
 		}
 		cur_tsc = rte_rdtsc();

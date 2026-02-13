@@ -484,9 +484,12 @@ struct mlx5_devx_create_sq_attr {
 	uint32_t non_wire:1;
 	uint32_t static_sq_wq:1;
 	uint32_t ts_format:2;
+	uint32_t multi_user_qp_type:2;
 	uint32_t hairpin_wq_buffer_type:3;
 	uint32_t user_index:24;
+	uint32_t multi_user_group_size:8;
 	uint32_t cqn:24;
+	uint32_t hairpin_peer_rq_or_multi_user_master_qp:18;
 	uint32_t packet_pacing_rate_limit_index:16;
 	uint32_t tis_lst_sz:16;
 	uint32_t tis_num:24;
@@ -501,6 +504,7 @@ struct mlx5_devx_create_sq_attr {
 /* SQ attributes structure, used by SQ modify operation. */
 struct mlx5_devx_modify_sq_attr {
 	uint32_t sq_state:4;
+	uint32_t op_mod:4;
 	uint32_t state:4;
 	uint32_t hairpin_peer_rq:24;
 	uint32_t hairpin_peer_vhca:16;

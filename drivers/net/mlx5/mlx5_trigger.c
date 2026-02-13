@@ -80,13 +80,38 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 				rte_errno = ENOMEM;
 				goto error;
 			}
-			ret = priv->obj_ops.txq_obj_new(dev, i);
-			if (ret < 0) {
-				mlx5_free(txq_ctrl->obj);
-				txq_ctrl->obj = NULL;
-				goto error;
+
+
+			if (MULTI_USER_SQ_EN == 1) {
+				// Create master SQ when i=0
+				if (i == 0) {
+					ret = priv->obj_ops.master_txq_obj_new(dev, i);
+					if (ret < 0) {
+						mlx5_free(txq_ctrl->obj);
+						txq_ctrl->obj = NULL;
+						goto error;
+					}
+				}
+				// Create slave SQ when i>0
+				else {
+					ret = priv->obj_ops.slave_txq_obj_new(dev, i);
+					if (ret < 0) {
+						mlx5_free(txq_ctrl->obj);
+						txq_ctrl->obj = NULL;
+						goto error;
+					}
+				}
 			}
-			if (!txq_ctrl->is_hairpin) {
+			else {
+				ret = priv->obj_ops.txq_obj_new(dev, i);
+				if (ret < 0) {
+					mlx5_free(txq_ctrl->obj);
+					txq_ctrl->obj = NULL;
+					goto error;
+				}
+			}
+
+			if (!txq_ctrl->is_hairpin && (MULTI_USER_SQ_EN == 1 && i == 0)) {
 				size_t size = txq_data->cqe_s * sizeof(*txq_data->fcqs);
 
 				txq_data->fcqs = mlx5_malloc_numa_tolerant(flags, size,

@@ -29,6 +29,7 @@
 #include <mlx5_common_devx.h>
 #include <mlx5_common_defs.h>
 
+#include "generic/rte_spinlock.h"
 #include "mlx5_defs.h"
 #include "mlx5_utils.h"
 #include "mlx5_os.h"
@@ -42,6 +43,9 @@
 #endif
 #include "hws/mlx5dr.h"
 #endif
+
+// TODO: Temporaty MULTI_USER_SQ_EN definition
+#define MULTI_USER_SQ_EN 1
 
 #define MLX5_SH(dev) (((struct mlx5_priv *)(dev)->data->dev_private)->sh)
 
@@ -1512,6 +1516,16 @@ struct mlx5_dev_registers {
 	enum modify_reg nat64_regs[MLX5_FLOW_NAT64_REGS_MAX];
 };
 
+struct mlx5_multi_user_group {
+	rte_spinlock_t lock;
+	bool active;
+
+	uint32_t master_sqn;
+	uint32_t uid;
+	uint32_t pdn;
+	uint32_t group_size;
+	uint32_t slaves_created;
+};
 #if defined(HAVE_MLX5DV_DR) && \
 	(defined(HAVE_MLX5_DR_CREATE_ACTION_FLOW_METER) || \
 	 defined(HAVE_MLX5_DR_CREATE_ACTION_ASO))
@@ -1661,6 +1675,7 @@ struct mlx5_dev_ctx_shared {
 	rte_spinlock_t cpool_lock;
 	LIST_HEAD(hws_cpool_list, mlx5_hws_cnt_pool) hws_cpool_list; /* Count pool list. */
 	struct mlx5_dev_registers registers;
+	struct mlx5_multi_user_group multi_user_group;
 	struct mlx5_dev_shared_port port[]; /* per device port data array. */
 };
 
@@ -1804,6 +1819,12 @@ enum mlx5_txq_modify_type {
 	MLX5_TXQ_MOD_ERR2RDY, /* modify state from error to ready. */
 };
 
+enum mlx5_txq_type {
+	MLX5_TXQ_TYPE_SINGLE_USER, /* Single-User SQ*/
+	MLX5_TXQ_TYPE_MASTER, /* Multi-user master SQ. */
+	MLX5_TXQ_TYPE_SLAVE, /* Multi-user slave SQ. */
+};
+
 struct mlx5_rxq_priv;
 struct mlx5_priv;
 
@@ -1834,6 +1855,8 @@ struct mlx5_obj_ops {
 	int (*drop_action_create)(struct rte_eth_dev *dev);
 	void (*drop_action_destroy)(struct rte_eth_dev *dev);
 	int (*txq_obj_new)(struct rte_eth_dev *dev, uint16_t idx);
+	int (*master_txq_obj_new)(struct rte_eth_dev *dev, uint16_t idx);
+	int (*slave_txq_obj_new)(struct rte_eth_dev *dev, uint16_t idx);
 	int (*txq_obj_modify)(struct mlx5_txq_obj *obj,
 			      enum mlx5_txq_modify_type type, uint8_t dev_port);
 	void (*txq_obj_release)(struct mlx5_txq_obj *txq_obj);

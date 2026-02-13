@@ -18,6 +18,7 @@
 #include <mlx5_common_devx.h>
 #include <mlx5_malloc.h>
 
+#include "generic/rte_spinlock.h"
 #include "mlx5.h"
 #include "mlx5_common_os.h"
 #include "mlx5_driver_event.h"
@@ -171,6 +172,66 @@ mlx5_devx_modify_rq(struct mlx5_rxq_priv *rxq, uint8_t type)
 	return mlx5_devx_cmd_modify_rq(rxq->devx_rq.rq, &rq_attr);
 }
 
+
+/**
+ * Modify Multi-User SQ using DevX API.
+ *
+ * @param txq_obj
+ *   DevX Tx queue object.
+ * @param type
+ *   Type of change queue state.
+ * @param dev_port
+ *   Unnecessary.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+int
+mlx5_mu_txq_devx_modify(struct mlx5_txq_obj *obj, enum mlx5_txq_modify_type type,
+		     uint8_t dev_port, enum mlx5_txq_type mu_type)
+{
+	struct mlx5_devx_modify_sq_attr msq_attr = { 0 };
+	int ret;
+
+	if (type != MLX5_TXQ_MOD_RST2RDY) {
+		/* Change queue state to reset. */
+		if (type == MLX5_TXQ_MOD_ERR2RDY)
+			msq_attr.sq_state = MLX5_SQC_STATE_ERR;
+		else
+			msq_attr.sq_state = MLX5_SQC_STATE_RDY;
+		msq_attr.state = MLX5_SQC_STATE_RST;
+		msq_attr.op_mod = mu_type;
+		ret = mlx5_devx_cmd_modify_sq(obj->sq_obj.sq, &msq_attr);
+		if (ret) {
+			DRV_LOG(ERR, "Cannot change the Tx SQ state to RESET"
+				" %s", strerror(errno));
+			rte_errno = errno;
+			return ret;
+		}
+	}
+	if (type != MLX5_TXQ_MOD_RDY2RST) {
+		/* Change queue state to ready. */
+		msq_attr.sq_state = MLX5_SQC_STATE_RST;
+		msq_attr.state = MLX5_SQC_STATE_RDY;
+		msq_attr.op_mod = mu_type;
+		ret = mlx5_devx_cmd_modify_sq(obj->sq_obj.sq, &msq_attr);
+		if (ret) {
+			DRV_LOG(ERR, "Cannot change the Tx SQ state to READY"
+				" %s", strerror(errno));
+			rte_errno = errno;
+			return ret;
+		}
+	}
+	/*
+	 * The dev_port variable is relevant only in Verbs API, and there is a
+	 * pointer that points to this function and a parallel function in verbs
+	 * intermittently, so they should have the same parameters.
+	 */
+	(void)dev_port;
+	return 0;
+}
+
+
 /**
  * Modify SQ using DevX API.
  *
@@ -190,6 +251,7 @@ mlx5_txq_devx_modify(struct mlx5_txq_obj *obj, enum mlx5_txq_modify_type type,
 {
 	struct mlx5_devx_modify_sq_attr msq_attr = { 0 };
 	int ret;
+	msq_attr.op_mod = MLX5_TXQ_TYPE_SINGLE_USER;
 
 	if (type != MLX5_TXQ_MOD_RST2RDY) {
 		/* Change queue state to reset. */
@@ -1477,6 +1539,135 @@ mlx5_txq_release_devx_resources(struct mlx5_txq_obj *txq_obj)
 	memset(&txq_obj->cq_obj, 0, sizeof(txq_obj->cq_obj));
 }
 
+
+/**
+ * Create Slave SQ object and its resources using DevX.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param idx
+ *   Queue index in DPDK Tx queue array.
+ * @param[in] log_desc_n
+ *   Log of number of descriptors in queue.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+static int
+mlx5_slave_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
+				  uint16_t log_desc_n)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_common_device *cdev = priv->sh->cdev;
+	struct mlx5_uar *uar = &priv->sh->tx_uar;
+	struct mlx5_txq_data *txq_data = (*priv->txqs)[idx];
+	struct mlx5_txq_ctrl *txq_ctrl =
+			container_of(txq_data, struct mlx5_txq_ctrl, txq);
+	struct mlx5_txq_obj *txq_obj = txq_ctrl->obj;
+	struct mlx5_multi_user_group *mu_group = &priv->sh->multi_user_group;
+	struct mlx5_devx_create_sq_attr sq_attr = {
+		.flush_in_error_en = 1,
+		.allow_multi_pkt_send_wqe = !!priv->config.mps,
+		.min_wqe_inline_mode = cdev->config.hca_attr.vport_inline_mode,
+		.allow_swp = !!priv->sh->dev_cap.swp,
+		.tis_lst_sz = 1,
+		.wq_attr = (struct mlx5_devx_wq_attr){
+			.pd = cdev->pdn,
+			.uar_page = mlx5_os_get_devx_uar_page_id(uar->obj),
+		},
+		.ts_format =
+			mlx5_ts_format_conv(cdev->config.hca_attr.sq_ts_format),
+		.multi_user_qp_type = 2,
+		.tis_num = mlx5_get_txq_tis_num(dev, idx),
+	};
+	uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
+	int ret;
+
+	rte_spinlock_lock(&mu_group->lock);
+	sq_attr.hairpin_peer_rq_or_multi_user_master_qp = mu_group->master_sqn;
+	rte_spinlock_unlock(&mu_group->lock);
+
+	ret = mlx5_devx_sq_create(cdev->ctx, &txq_obj->sq_obj,
+				  log_desc_n, &sq_attr, priv->sh->numa_node);
+	if (!ret && priv->sh->config.txq_mem_algn)
+		priv->consec_tx_mem.sq_cur_off += txq_data->sq_mem_len;
+
+	return ret;
+}
+
+
+
+/**
+ * Create Master SQ object and its resources using DevX.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param idx
+ *   Queue index in DPDK Tx queue array.
+ * @param[in] log_desc_n
+ *   Log of number of descriptors in queue.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+static int
+mlx5_master_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
+				  uint16_t log_desc_n)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_common_device *cdev = priv->sh->cdev;
+	struct mlx5_uar *uar = &priv->sh->tx_uar;
+	struct mlx5_txq_data *txq_data = (*priv->txqs)[idx];
+	struct mlx5_txq_ctrl *txq_ctrl =
+			container_of(txq_data, struct mlx5_txq_ctrl, txq);
+	struct mlx5_txq_obj *txq_obj = txq_ctrl->obj;
+	struct mlx5_multi_user_group *mu_group = &priv->sh->multi_user_group;
+	struct mlx5_devx_create_sq_attr sq_attr = {
+		.flush_in_error_en = 1,
+		.allow_multi_pkt_send_wqe = !!priv->config.mps,
+		.min_wqe_inline_mode = cdev->config.hca_attr.vport_inline_mode,
+		.allow_swp = !!priv->sh->dev_cap.swp,
+		.cqn = txq_obj->cq_obj.cq->id,
+		.tis_lst_sz = 1,
+		.wq_attr = (struct mlx5_devx_wq_attr){
+			.pd = cdev->pdn,
+			.uar_page = mlx5_os_get_devx_uar_page_id(uar->obj),
+		},
+		.ts_format =
+			mlx5_ts_format_conv(cdev->config.hca_attr.sq_ts_format),
+		.multi_user_qp_type = 1,
+		// TODO : support dynamic multi user group size
+		.multi_user_group_size = 2,
+		.tis_num = mlx5_get_txq_tis_num(dev, idx),
+	};
+	uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
+	int ret;
+
+	/* Create Send Queue object with DevX. */
+	if (priv->sh->config.txq_mem_algn) {
+		sq_attr.umem = priv->consec_tx_mem.umem;
+		sq_attr.umem_obj = priv->consec_tx_mem.umem_obj;
+		sq_attr.q_off = priv->consec_tx_mem.sq_cur_off;
+		sq_attr.db_off = db_start + (2 * idx) * MLX5_DBR_SIZE;
+		sq_attr.q_len = txq_data->sq_mem_len;
+	}
+	ret = mlx5_devx_sq_create(cdev->ctx, &txq_obj->sq_obj,
+				  log_desc_n, &sq_attr, priv->sh->numa_node);
+	if (!ret && priv->sh->config.txq_mem_algn)
+		priv->consec_tx_mem.sq_cur_off += txq_data->sq_mem_len;
+
+	// Fill MU group parameters
+	rte_spinlock_lock(&mu_group->lock);
+	priv->sh->multi_user_group.master_sqn = txq_obj->sq_obj.sq->id;
+	priv->sh->multi_user_group.pdn = cdev->pdn;
+	// TODO: priv->sh->multi_user_group.group_size = ;
+	priv->sh->multi_user_group.uid = 0;
+	rte_spinlock_unlock(&mu_group->lock);
+	return ret;
+}
+
+
+
 /**
  * Create a SQ object and its resources using DevX.
  *
@@ -1535,6 +1726,284 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 }
 #endif
 
+
+
+/**
+ * Create Master SQ DevX object.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param idx
+ *   Queue index in DPDK Tx queue array.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+int
+mlx5_master_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_txq_data *txq_data = (*priv->txqs)[idx];
+	struct mlx5_txq_ctrl *txq_ctrl =
+			container_of(txq_data, struct mlx5_txq_ctrl, txq);
+
+	if (txq_ctrl->is_hairpin)
+		return mlx5_txq_obj_hairpin_new(dev, idx);
+#if !defined(HAVE_MLX5DV_DEVX_UAR_OFFSET) && defined(HAVE_INFINIBAND_VERBS_H)
+	DRV_LOG(ERR, "Port %u Tx queue %u cannot create with DevX, no UAR.",
+		     dev->data->port_id, idx);
+	rte_errno = ENOMEM;
+	return -rte_errno;
+#else
+	struct mlx5_proc_priv *ppriv = MLX5_PROC_PRIV(PORT_ID(priv));
+	struct mlx5_dev_ctx_shared *sh = priv->sh;
+	struct mlx5_txq_obj *txq_obj = txq_ctrl->obj;
+	struct mlx5_devx_cq_attr cq_attr = {
+		.uar_page_id = mlx5_os_get_devx_uar_page_id(sh->tx_uar.obj),
+	};
+	uint32_t cqe_n, log_desc_n;
+	uint32_t wqe_n, wqe_size;
+	int ret = 0;
+	uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
+
+	MLX5_ASSERT(txq_data);
+	MLX5_ASSERT(txq_obj);
+	MLX5_ASSERT(rte_eal_process_type() == RTE_PROC_PRIMARY);
+	MLX5_ASSERT(ppriv);
+	txq_obj->txq_ctrl = txq_ctrl;
+	txq_obj->dev = dev;
+
+	// idx=0 is the Master SQ
+	//if(idx==0) {
+
+	if (__rte_trace_point_fp_is_enabled() &&
+	    txq_data->offloads & RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP)
+		cqe_n = UINT16_MAX / 2 - 1;
+	else
+		cqe_n = (1UL << txq_data->elts_n) / MLX5_TX_COMP_THRESH +
+			1 + MLX5_TX_COMP_THRESH_INLINE_DIV;
+	log_desc_n = log2above(cqe_n);
+	cqe_n = 1UL << log_desc_n;
+	if (cqe_n > UINT16_MAX) {
+		DRV_LOG(ERR, "Port %u Tx queue %u requests to many CQEs %u.",
+			dev->data->port_id, txq_data->idx, cqe_n);
+		rte_errno = EINVAL;
+		return 0;
+	}
+	if (priv->sh->config.txq_mem_algn) {
+		cq_attr.umem = priv->consec_tx_mem.umem;
+		cq_attr.umem_obj = priv->consec_tx_mem.umem_obj;
+		cq_attr.q_off = priv->consec_tx_mem.cq_cur_off;
+		cq_attr.db_off = db_start + (2 * idx + 1) * MLX5_DBR_SIZE;
+		cq_attr.q_len = txq_data->cq_mem_len;
+	}
+	/* Create completion queue object with DevX. */
+	ret = mlx5_devx_cq_create(sh->cdev->ctx, &txq_obj->cq_obj, log_desc_n,
+				  &cq_attr, priv->sh->numa_node);
+	if (ret) {
+		DRV_LOG(ERR, "Port %u Tx queue %u CQ creation failure.",
+			dev->data->port_id, idx);
+		goto error;
+	}
+	txq_data->cqe_n = log_desc_n;
+	txq_data->cqe_s = cqe_n;
+	txq_data->cqe_m = txq_data->cqe_s - 1;
+	txq_data->cqes = txq_obj->cq_obj.cqes;
+	txq_data->cq_ci = 0;
+	txq_data->cq_pi = 0;
+	txq_data->cq_db = txq_obj->cq_obj.db_rec;
+	*txq_data->cq_db = 0;
+	/*
+	 * Adjust the amount of WQEs depending on inline settings.
+	 * The number of descriptors should be enough to handle
+	 * the specified number of packets. If queue is being created
+	 * with Verbs the rdma-core does queue size adjustment
+	 * internally in the mlx5_calc_sq_size(), we do the same
+	 * for the queue being created with DevX at this point.
+	 */
+	wqe_size = txq_data->tso_en ?
+		   RTE_ALIGN(txq_ctrl->max_tso_header, MLX5_WSEG_SIZE) : 0;
+	wqe_size += sizeof(struct mlx5_wqe_cseg) +
+		    sizeof(struct mlx5_wqe_eseg) +
+		    sizeof(struct mlx5_wqe_dseg);
+	if (txq_data->inlen_send)
+		wqe_size = RTE_MAX(wqe_size, sizeof(struct mlx5_wqe_cseg) +
+					     sizeof(struct mlx5_wqe_eseg) +
+					     RTE_ALIGN(txq_data->inlen_send +
+						       sizeof(uint32_t),
+						       MLX5_WSEG_SIZE));
+	wqe_size = RTE_ALIGN(wqe_size, MLX5_WQE_SIZE) / MLX5_WQE_SIZE;
+	/* Create Send Queue object with DevX. */
+	wqe_n = RTE_MIN((1UL << txq_data->elts_n) * wqe_size,
+			(uint32_t)mlx5_dev_get_max_wq_size(priv->sh));
+	log_desc_n = log2above(wqe_n);
+	ret = mlx5_master_txq_create_devx_sq_resources(dev, idx, log_desc_n);
+	if (ret) {
+		DRV_LOG(ERR, "Port %u Tx queue %u SQ creation failure.",
+			dev->data->port_id, idx);
+		rte_errno = errno;
+		goto error;
+	}
+	/* Create the Work Queue. */
+	txq_data->wqe_n = log_desc_n;
+	txq_data->wqe_s = 1 << txq_data->wqe_n;
+	txq_data->wqe_m = txq_data->wqe_s - 1;
+	txq_data->wqes = (struct mlx5_wqe *)(uintptr_t)txq_obj->sq_obj.wqes;
+	txq_data->wqes_end = txq_data->wqes + txq_data->wqe_s;
+	txq_data->wqe_ci = 0;
+	txq_data->wqe_pi = 0;
+	txq_data->wqe_comp = 0;
+	txq_data->wqe_thres = txq_data->wqe_s / MLX5_TX_COMP_THRESH_INLINE_DIV;
+	txq_data->qp_db = &txq_obj->sq_obj.db_rec[MLX5_SND_DBR];
+	*txq_data->qp_db = 0;
+	txq_data->qp_num_8s = txq_obj->sq_obj.sq->id << 8;
+	txq_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
+	txq_data->db_nc = sh->tx_uar.dbnc;
+	txq_data->wait_on_time = !!(!sh->config.tx_pp &&
+				    sh->cdev->config.hca_attr.wait_on_time);
+	/* Change Send Queue state to Ready-to-Send. */
+	ret = mlx5_mu_txq_devx_modify(txq_obj, MLX5_TXQ_MOD_RST2RDY, 0, MLX5_TXQ_TYPE_MASTER);
+	if (ret) {
+		rte_errno = errno;
+		DRV_LOG(ERR,
+			"Port %u Tx queue %u SQ state to SQC_STATE_RDY failed.",
+			dev->data->port_id, idx);
+		goto error;
+	}
+#ifdef HAVE_IBV_FLOW_DV_SUPPORT
+	/*
+	 * If using DevX need to query and store TIS transport domain value.
+	 * This is done once per port.
+	 * Will use this value on Rx, when creating matching TIR.
+	 */
+	if (!priv->sh->tdn)
+		priv->sh->tdn = priv->sh->td->id;
+#endif
+	txq_ctrl->uar_mmap_offset =
+			mlx5_os_get_devx_uar_mmap_offset(sh->tx_uar.obj);
+	if (priv->sh->config.txq_mem_algn)
+		priv->consec_tx_mem.cq_cur_off += txq_data->cq_mem_len;
+	ppriv->uar_table[txq_data->idx] = sh->tx_uar.bf_db;
+	dev->data->tx_queue_state[idx] = RTE_ETH_QUEUE_STATE_STARTED;
+	/* Notify external users that Tx queue was created. */
+	mlx5_driver_event_notify_txq_create(txq_ctrl);
+	return 0;
+error:
+	ret = rte_errno; /* Save rte_errno before cleanup. */
+	mlx5_txq_release_devx_resources(txq_obj);
+	rte_errno = ret; /* Restore rte_errno. */
+	return -rte_errno;
+#endif
+}
+
+
+/**
+ * Create Slave SQ DevX object.
+ *
+ * @param dev
+ *   Pointer to Ethernet device.
+ * @param idx
+ *   Queue index in DPDK Tx queue array.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise and rte_errno is set.
+ */
+int
+mlx5_slave_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_txq_data *txq_data = (*priv->txqs)[idx];
+	struct mlx5_txq_ctrl *txq_ctrl =
+			container_of(txq_data, struct mlx5_txq_ctrl, txq);
+
+	if (txq_ctrl->is_hairpin)
+		return mlx5_txq_obj_hairpin_new(dev, idx);
+#if !defined(HAVE_MLX5DV_DEVX_UAR_OFFSET) && defined(HAVE_INFINIBAND_VERBS_H)
+	DRV_LOG(ERR, "Port %u Tx queue %u cannot create with DevX, no UAR.",
+		     dev->data->port_id, idx);
+	rte_errno = ENOMEM;
+	return -rte_errno;
+#else
+	struct mlx5_proc_priv *ppriv = MLX5_PROC_PRIV(PORT_ID(priv));
+	struct mlx5_dev_ctx_shared *sh = priv->sh;
+	struct mlx5_txq_obj *txq_obj = txq_ctrl->obj;
+	uint32_t  log_desc_n;
+	int ret = 0;
+
+	MLX5_ASSERT(txq_data);
+	MLX5_ASSERT(txq_obj);
+	MLX5_ASSERT(rte_eal_process_type() == RTE_PROC_PRIMARY);
+	MLX5_ASSERT(ppriv);
+	txq_obj->txq_ctrl = txq_ctrl;
+	txq_obj->dev = dev;
+
+	// idx=0 is the Master SQ
+	//if(idx==0) {
+
+	log_desc_n = 0;
+	ret = mlx5_slave_txq_create_devx_sq_resources(dev, idx, log_desc_n);
+	if (ret) {
+		DRV_LOG(ERR, "Port %u Tx queue %u SQ creation failure.",
+			dev->data->port_id, idx);
+		rte_errno = errno;
+		goto error;
+	}
+	/* Create the Work Queue. */
+	/*
+	txq_data->wqe_n = log_desc_n;
+	txq_data->wqe_s = 1 << txq_data->wqe_n;
+	txq_data->wqe_m = txq_data->wqe_s - 1;
+	txq_data->wqes = (struct mlx5_wqe *)(uintptr_t)txq_obj->sq_obj.wqes;
+	txq_data->wqes_end = txq_data->wqes + txq_data->wqe_s;
+	txq_data->wqe_ci = 0;
+	txq_data->wqe_pi = 0;
+	txq_data->wqe_comp = 0;
+	txq_data->wqe_thres = txq_data->wqe_s / MLX5_TX_COMP_THRESH_INLINE_DIV;
+	txq_data->qp_db = &txq_obj->sq_obj.db_rec[MLX5_SND_DBR];
+	*txq_data->qp_db = 0;
+	txq_data->qp_num_8s = txq_obj->sq_obj.sq->id << 8;
+	txq_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
+	txq_data->db_nc = sh->tx_uar.dbnc;
+	txq_data->wait_on_time = !!(!sh->config.tx_pp &&
+				    sh->cdev->config.hca_attr.wait_on_time);
+	*/
+	/* Change Send Queue state to Ready-to-Send. */
+	ret = mlx5_mu_txq_devx_modify(txq_obj, MLX5_TXQ_MOD_RST2RDY, 0, MLX5_TXQ_TYPE_SLAVE);
+	if (ret) {
+		rte_errno = errno;
+		DRV_LOG(ERR,
+			"Port %u Tx queue %u SQ state to SQC_STATE_RDY failed.",
+			dev->data->port_id, idx);
+		goto error;
+	}
+#ifdef HAVE_IBV_FLOW_DV_SUPPORT
+	/*
+	 * If using DevX need to query and store TIS transport domain value.
+	 * This is done once per port.
+	 * Will use this value on Rx, when creating matching TIR.
+	 */
+	if (!priv->sh->tdn)
+		priv->sh->tdn = priv->sh->td->id;
+#endif
+	txq_ctrl->uar_mmap_offset =
+			mlx5_os_get_devx_uar_mmap_offset(sh->tx_uar.obj);
+	if (priv->sh->config.txq_mem_algn)
+		priv->consec_tx_mem.cq_cur_off += txq_data->cq_mem_len;
+	ppriv->uar_table[txq_data->idx] = sh->tx_uar.bf_db;
+	dev->data->tx_queue_state[idx] = RTE_ETH_QUEUE_STATE_STARTED;
+	/* Notify external users that Tx queue was created. */
+	mlx5_driver_event_notify_txq_create(txq_ctrl);
+	return 0;
+error:
+	ret = rte_errno; /* Save rte_errno before cleanup. */
+	mlx5_txq_release_devx_resources(txq_obj);
+	rte_errno = ret; /* Restore rte_errno. */
+	return -rte_errno;
+#endif
+}
+
+
+
 /**
  * Create the Tx queue DevX object.
  *
@@ -1579,6 +2048,10 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	MLX5_ASSERT(ppriv);
 	txq_obj->txq_ctrl = txq_ctrl;
 	txq_obj->dev = dev;
+
+	// idx=0 is the Master SQ
+	//if(idx==0) {
+
 	if (__rte_trace_point_fp_is_enabled() &&
 	    txq_data->offloads & RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP)
 		cqe_n = UINT16_MAX / 2 - 1;
@@ -1750,6 +2223,8 @@ struct mlx5_obj_ops devx_obj_ops = {
 	.drop_action_create = mlx5_devx_drop_action_create,
 	.drop_action_destroy = mlx5_devx_drop_action_destroy,
 	.txq_obj_new = mlx5_txq_devx_obj_new,
+	.master_txq_obj_new = mlx5_master_txq_devx_obj_new,
+	.slave_txq_obj_new = mlx5_slave_txq_devx_obj_new,
 	.txq_obj_modify = mlx5_txq_devx_modify,
 	.txq_obj_release = mlx5_txq_devx_obj_release,
 	.lb_dummy_queue_create = NULL,

@@ -252,7 +252,7 @@ mlx5_devx_sq_create(void *ctx, struct mlx5_devx_sq *sq_obj, uint16_t log_wqbb_n,
 	void *umem_buf = NULL;
 	size_t alignment = MLX5_WQE_BUF_ALIGNMENT;
 	uint32_t umem_size, umem_dbrec;
-	uint32_t num_of_wqbbs = RTE_BIT32(log_wqbb_n);
+	uint32_t num_of_wqbbs = log_wqbb_n == 0 ? 0 : RTE_BIT32(log_wqbb_n);
 	int ret;
 	uint32_t umem_offset, umem_id;
 	uint16_t act_log_size = log_wqbb_n;

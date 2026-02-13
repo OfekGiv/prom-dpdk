@@ -8,6 +8,11 @@
 #include "mlx5.h"
 
 int mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx);
+int mlx5_master_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx);
+int mlx5_slave_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx);
+
+int mlx5_mu_txq_devx_modify(struct mlx5_txq_obj *obj, enum mlx5_txq_modify_type type,
+		     uint8_t dev_port, enum mlx5_txq_type mu_type);
 int mlx5_txq_devx_modify(struct mlx5_txq_obj *obj,
 			 enum mlx5_txq_modify_type type, uint8_t dev_port);
 void mlx5_txq_devx_obj_release(struct mlx5_txq_obj *txq_obj);

@@ -2031,10 +2031,14 @@ mlx5_devx_cmd_create_sq(void *ctx,
 		return NULL;
 	}
 	MLX5_SET(create_sq_in, in, opcode, MLX5_CMD_OP_CREATE_SQ);
+	MLX5_SET(create_sq_in, in, op_mod, sq_attr->multi_user_qp_type);
 	sq_ctx = MLX5_ADDR_OF(create_sq_in, in, ctx);
 	MLX5_SET(sqc, sq_ctx, rlky, sq_attr->rlky);
 	MLX5_SET(sqc, sq_ctx, cd_master, sq_attr->cd_master);
 	MLX5_SET(sqc, sq_ctx, fre, sq_attr->fre);
+	MLX5_SET(sqc, sq_ctx, multi_user_qp_type, sq_attr->multi_user_qp_type);
+	MLX5_SET(sqc, sq_ctx, multi_user_group_size, sq_attr->multi_user_group_size);
+	MLX5_SET(sqc, sq_ctx, hairpin_peer_rq_or_multi_user_master_qp, sq_attr->hairpin_peer_rq_or_multi_user_master_qp);
 	MLX5_SET(sqc, sq_ctx, flush_in_error_en, sq_attr->flush_in_error_en);
 	MLX5_SET(sqc, sq_ctx, allow_multi_pkt_send_wqe,
 		 sq_attr->allow_multi_pkt_send_wqe);
@@ -2067,6 +2071,51 @@ mlx5_devx_cmd_create_sq(void *ctx,
 	sq->id = MLX5_GET(create_sq_out, out, sqn);
 	return sq;
 }
+/*
+RTE_EXPORT_INTERNAL_SYMBOL(mlx5_devx_cmd_create_slave_sq)
+struct mlx5_devx_obj *
+mlx5_devx_cmd_create_slave_sq(void *ctx,
+			      struct mlx5_devx_create_sq_attr *sq_attr)
+{
+	uint32_t in[MLX5_ST_SZ_DW(create_sq_in)] = {0};
+	uint32_t out[MLX5_ST_SZ_DW(create_sq_out)] = {0};
+	void *sq_ctx;
+	void *wq_ctx;
+	struct mlx5_devx_wq_attr wq_attr = {0};
+	struct mlx5_devx_obj *sq = NULL;
+
+	sq = mlx5_malloc(MLX5_MEM_ZERO, sizeof(*sq), 0, SOCKET_ID_ANY);
+	if (!sq) {
+		DRV_LOG(ERR, "Failed to allocate SQ data");
+		rte_errno = ENOMEM;
+		return NULL;
+	}
+	MLX5_SET(create_sq_in, in, opcode, MLX5_CMD_OP_CREATE_SQ);
+	MLX5_SET(create_sq_in, in, op_mod, 0x1);
+	sq_ctx = MLX5_ADDR_OF(create_sq_in, in, ctx);
+	// Set only the required slave-specific fields. All other configs are left unset.
+	MLX5_SET(sqc, sq_ctx, hairpin_peer_rq_or_multi_user_master_qp,
+		 hairpin_peer_rq_or_multi_user_master_qp);
+	MLX5_SET(sqc, sq_ctx, user_index, uid);
+	MLX5_SET(sqc, sq_ctx, pd, pd);
+	MLX5_SET(sqc, sq_ctx, uar_page, uar_page);
+	// fill minimal wq data: only doorbell (dbr) related fields
+	wq_ctx = MLX5_ADDR_OF(sqc, sq_ctx, wq);
+	wq_attr.dbr_addr = dbr_addr;
+	wq_attr.dbr_umem_valid = dbr_umem_valid;
+	wq_attr.dbr_umem_id = dbr_umem_id;
+	devx_cmd_fill_wq_data(wq_ctx, &wq_attr);
+	sq->obj = mlx5_glue->devx_obj_create(ctx, in, sizeof(in),
+					     out, sizeof(out));
+	if (!sq->obj) {
+		DEVX_DRV_LOG(ERR, out, "create slave SQ", NULL, 0);
+		mlx5_free(sq);
+		return NULL;
+	}
+	sq->id = MLX5_GET(create_sq_out, out, sqn);
+	return sq;
+}
+*/
 
 /**
  * Modify SQ using DevX API.
@@ -2092,14 +2141,19 @@ mlx5_devx_cmd_modify_sq(struct mlx5_devx_obj *sq,
 	MLX5_SET(modify_sq_in, in, opcode, MLX5_CMD_OP_MODIFY_SQ);
 	MLX5_SET(modify_sq_in, in, sq_state, sq_attr->sq_state);
 	MLX5_SET(modify_sq_in, in, sqn, sq->id);
+	MLX5_SET(modify_sq_in, in, op_mod, sq_attr->op_mod);
 	sq_ctx = MLX5_ADDR_OF(modify_sq_in, in, ctx);
 	MLX5_SET(sqc, sq_ctx, state, sq_attr->state);
-	MLX5_SET(sqc, sq_ctx, hairpin_peer_rq, sq_attr->hairpin_peer_rq);
+	MLX5_SET(sqc, sq_ctx, hairpin_peer_rq_or_multi_user_master_qp, sq_attr->hairpin_peer_rq);
 	MLX5_SET(sqc, sq_ctx, hairpin_peer_vhca, sq_attr->hairpin_peer_vhca);
 	ret = mlx5_glue->devx_obj_modify(sq->obj, in, sizeof(in),
 					 out, sizeof(out));
+
 	if (ret) {
-		DRV_LOG(ERR, "Failed to modify SQ using DevX");
+		int status = MLX5_GET(modify_sq_out, out, status);
+		int syndrome = MLX5_GET(modify_sq_out, out, syndrome);
+		DRV_LOG(ERR, "Failed to modify SQ using DevX. Status: 0x%x, syndrome: 0x%x",status, syndrome);
+
 		rte_errno = errno;
 		return -rte_errno;
 	}
