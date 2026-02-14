@@ -6743,8 +6743,8 @@ rte_eth_tx_burst(uint16_t port_id, uint16_t queue_id,
 
 	/* fetch pointer to queue data */
 	p = &rte_eth_fp_ops[port_id];
-	//qd = p->txq.data[queue_id];
-	qd = p->txq.data[0];
+	qd = p->txq.data[queue_id];
+	//qd = p->txq.data[0];
 
 #ifdef RTE_ETHDEV_DEBUG_TX
 	RTE_ETH_VALID_PORTID_OR_ERR_RET(port_id, 0);

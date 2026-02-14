@@ -33,8 +33,12 @@ mlx5_txq_stop(struct rte_eth_dev *dev)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
 	unsigned int i;
-
+/*
 	for (i = 0; i != priv->txqs_n; ++i)
+		mlx5_txq_release(dev, i);
+*/
+	// Release master SQ (idx=0) after all slaves are released
+	for (i = priv->txqs_n - 1; i >= 0; --i)
 		mlx5_txq_release(dev, i);
 }
 
