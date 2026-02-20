@@ -2054,6 +2054,7 @@ mlx5_devx_cmd_create_sq(void *ctx,
 	MLX5_SET(sqc, sq_ctx, tis_lst_sz, sq_attr->tis_lst_sz);
 	MLX5_SET(sqc, sq_ctx, tis_num_0, sq_attr->tis_num);
 	MLX5_SET(sqc, sq_ctx, ts_format, sq_attr->ts_format);
+	MLX5_SET(sqc, sq_ctx, log_multi_user_group_size, sq_attr->log_multi_user_group_size);
 	wq_ctx = MLX5_ADDR_OF(sqc, sq_ctx, wq);
 	wq_attr = &sq_attr->wq_attr;
 	devx_cmd_fill_wq_data(wq_ctx, wq_attr);

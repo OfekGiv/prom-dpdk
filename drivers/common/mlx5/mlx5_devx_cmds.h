@@ -487,6 +487,7 @@ struct mlx5_devx_create_sq_attr {
 	uint32_t hairpin_wq_buffer_type:3;
 	uint32_t user_index:24;
 	uint32_t cqn:24;
+	uint32_t log_multi_user_group_size:3;
 	uint32_t packet_pacing_rate_limit_index:16;
 	uint32_t tis_lst_sz:16;
 	uint32_t tis_num:24;

@@ -3200,40 +3200,64 @@ enum {
 };
 
 struct mlx5_ifc_sqc_bits {
-	u8 rlky[0x1];
-	u8 cd_master[0x1];
-	u8 fre[0x1];
-	u8 flush_in_error_en[0x1];
-	u8 allow_multi_pkt_send_wqe[0x1];
-	u8 min_wqe_inline_mode[0x3];
-	u8 state[0x4];
-	u8 reg_umr[0x1];
-	u8 allow_swp[0x1];
-	u8 hairpin[0x1];
-	u8 non_wire[0x1];
-	u8 static_sq_wq[0x1];
-	u8 reserved_at_11[0x4];
-	u8 hairpin_wq_buffer_type[0x3];
-	u8 reserved_at_18[0x2];
-	u8 ts_format[0x02];
-	u8 reserved_at_1c[0x4];
-	u8 reserved_at_22[0x6];
-	u8 multi_user_qp_type[0x2];
-	u8 user_index[0x18];
-	u8 multi_user_group_size[0x8];
-	u8 cqn[0x18];
-	u8 reserved_at_60[0x8];
-	u8 hairpin_peer_rq_or_multi_user_master_qp[0x18];
-	u8 reserved_at_80[0x10];
-	u8 hairpin_peer_vhca[0x10];
-	u8 reserved_at_a0[0x50];
-	u8 packet_pacing_rate_limit_index[0x10];
-	u8 tis_lst_sz[0x10];
-	u8 reserved_at_110[0x10];
-	u8 reserved_at_120[0x40];
-	u8 reserved_at_160[0x8];
-	u8 tis_num_0[0x18];
-	struct mlx5_ifc_wq_bits wq;
+    uint8_t    rlky[0x1];
+    uint8_t    cd_master[0x1];
+    uint8_t    fre[0x1];
+    uint8_t    flush_in_error_en[0x1];
+    uint8_t    allow_multi_pkt_send_wqe[0x1];
+    uint8_t    min_wqe_inline_mode[0x3];
+    uint8_t    state[0x4];
+    uint8_t    reg_umr[0x1];
+    uint8_t    allow_swp[0x1];
+    uint8_t    hairpin[0x1];
+    uint8_t    non_wire[0x1];
+    uint8_t    static_sq_wq[0x1];
+    uint8_t    regexp_en[0x1];
+    uint8_t    qos_remap_en[0x1];
+    uint8_t    ft_connect_en[0x1];
+    uint8_t    reserved_at_14[0x1];
+    uint8_t    hairpin_wq_buffer_type[0x3];
+    uint8_t    send_dbr_mode[0x2];
+    uint8_t    ts_format[0x2];
+    uint8_t    hairpin_offload_type[0x4];
+
+    uint8_t    ft_connect_other_eswitch[0x1];
+    uint8_t    ft_connect_other_vport[0x1];
+    uint8_t    reserved_at_22[0x6];
+    uint8_t    user_index[0x18];
+
+    uint8_t    reserved_at_27[0x5];
+    uint8_t    log_multi_user_group_size[0x3];
+    uint8_t    cqn[0x18];
+
+    uint8_t    plane_index[0x8];
+    uint8_t    hairpin_peer_rq[0x18];
+
+    uint8_t    reserved_at_80[0x10];
+    uint8_t    hairpin_peer_vhca[0x10];
+
+    uint8_t    reserved_at_a0[0x8];
+    uint8_t    afu_id[0x18];
+
+    uint8_t    reserved_at_c0[0x8];
+    uint8_t    ts_cqe_to_dest_cqn[0x18];
+
+    uint8_t    qos_para_vport_number[0x10];
+    uint8_t    packet_pacing_rate_limit_index[0x10];
+
+    uint8_t    tis_lst_sz[0x10];
+    uint8_t    qos_queue_group_id[0x10];
+
+    uint8_t    ft_connect_table_type[0x8];
+    uint8_t    queue_handle[0x18];
+
+    uint8_t    ft_connect_eswitch_owner_vhca_id[0x10];
+    uint8_t    ft_connect_vport_number[0x10];
+
+    uint8_t    reserved_at_160[0x8];
+    uint8_t    tis_num_0[0x18];
+
+    struct mlx5_ifc_wq_bits wq;
 };
 
 struct mlx5_ifc_query_sq_out_bits {
