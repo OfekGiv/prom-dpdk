@@ -1501,6 +1501,7 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 	struct mlx5_txq_ctrl *txq_ctrl =
 			container_of(txq_data, struct mlx5_txq_ctrl, txq);
 	struct mlx5_txq_obj *txq_obj = txq_ctrl->obj;
+	uint8_t log_mu_grp_size = dev->data->mu_sq_log_grp_size;
 	struct mlx5_devx_create_sq_attr sq_attr = {
 		.flush_in_error_en = 1,
 		.allow_multi_pkt_send_wqe = !!priv->config.mps,
@@ -1515,8 +1516,7 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 		.ts_format =
 			mlx5_ts_format_conv(cdev->config.hca_attr.sq_ts_format),
 		.tis_num = mlx5_get_txq_tis_num(dev, idx),
-		/* TODO: Dynamic log_multi_user_group_size */
-		.log_multi_user_group_size = 1,
+		.log_multi_user_group_size = log_mu_grp_size,
 	};
 	uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
 	int ret;
@@ -1526,7 +1526,14 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 		sq_attr.umem = priv->consec_tx_mem.umem;
 		sq_attr.umem_obj = priv->consec_tx_mem.umem_obj;
 		sq_attr.q_off = priv->consec_tx_mem.sq_cur_off;
-		sq_attr.db_off = db_start + (2 * idx) * MLX5_DBR_SIZE;
+		if (log_mu_grp_size == 0) {
+			sq_attr.db_off = db_start + (2 * idx) * MLX5_DBR_SIZE;
+		}
+		else {
+			// Master CQ DBR is located at db_start. Master SQ DBR is located at
+			// db_start + MLX5_DBR_SIZE.
+			sq_attr.db_off = db_start + MLX5_DBR_SIZE;
+		}
 		sq_attr.q_len = txq_data->sq_mem_len;
 	}
 	ret = mlx5_devx_sq_create(cdev->ctx, &txq_obj->sq_obj,
@@ -1690,6 +1697,11 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 		priv->consec_tx_mem.cq_cur_off += txq_data->cq_mem_len;
 	ppriv->uar_table[txq_data->idx] = sh->tx_uar.bf_db;
 	dev->data->tx_queue_state[idx] = RTE_ETH_QUEUE_STATE_STARTED;
+
+	priv->sh->mu_group.master_sqn = txq_obj->sq_obj.sq->id;
+	priv->sh->mu_group.wqes_base = txq_obj->sq_obj.wqes;
+	priv->sh->mu_group.uar = &sh->tx_uar.bf_db;
+
 	/* Notify external users that Tx queue was created. */
 	mlx5_driver_event_notify_txq_create(txq_ctrl);
 	return 0;

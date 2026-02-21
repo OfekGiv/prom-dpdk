@@ -23,7 +23,6 @@
 #include <mlx5_common_mr.h>
 #include <mlx5_malloc.h>
 
-#include "baseband/acc/acc_common.h"
 #include "mlx5_defs.h"
 #include "mlx5_utils.h"
 #include "mlx5.h"

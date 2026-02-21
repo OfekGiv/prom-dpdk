@@ -51,60 +51,120 @@ static int
 mlx5_txq_start(struct rte_eth_dev *dev)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
+	uint8_t log_mu_grp_size = dev->data->mu_sq_log_grp_size;
 	uint32_t log_max_wqe = log2above(mlx5_dev_get_max_wq_size(priv->sh));
 	uint32_t flags = MLX5_MEM_RTE | MLX5_MEM_ZERO;
 	unsigned int i, cnt;
 	int ret;
 
-	for (cnt = log_max_wqe; cnt > 0; cnt -= 1) {
-		for (i = 0; i != priv->txqs_n; ++i) {
-			struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, i);
-			struct mlx5_txq_data *txq_data = &txq_ctrl->txq;
+	// Single-user SQ
+	if (log_mu_grp_size == 0) {
+		for (cnt = log_max_wqe; cnt > 0; cnt -= 1) {
+			for (i = 0; i != priv->txqs_n; ++i) {
+				struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, i);
+				struct mlx5_txq_data *txq_data = &txq_ctrl->txq;
 
-			if (!txq_ctrl)
-				continue;
-			if (txq_data->elts_n != cnt) {
-				mlx5_txq_release(dev, i);
-				continue;
-			}
-			if (!txq_ctrl->is_hairpin)
-				txq_alloc_elts(txq_ctrl);
-			MLX5_ASSERT(!txq_ctrl->obj);
-			txq_ctrl->obj = mlx5_malloc_numa_tolerant(flags,
-								  sizeof(struct mlx5_txq_obj),
-								  0, txq_ctrl->socket);
-			if (!txq_ctrl->obj) {
-				DRV_LOG(ERR, "Port %u Tx queue %u cannot allocate "
-					"memory resources.", dev->data->port_id,
-					txq_data->idx);
-				rte_errno = ENOMEM;
-				goto error;
-			}
-			ret = priv->obj_ops.txq_obj_new(dev, i);
-			if (ret < 0) {
-				mlx5_free(txq_ctrl->obj);
-				txq_ctrl->obj = NULL;
-				goto error;
-			}
-			if (!txq_ctrl->is_hairpin) {
-				size_t size = txq_data->cqe_s * sizeof(*txq_data->fcqs);
-
-				txq_data->fcqs = mlx5_malloc_numa_tolerant(flags, size,
-									   RTE_CACHE_LINE_SIZE,
-									   txq_ctrl->socket);
-				if (!txq_data->fcqs) {
-					DRV_LOG(ERR, "Port %u Tx queue %u cannot "
-						"allocate memory (FCQ).",
-						dev->data->port_id, i);
+				if (!txq_ctrl)
+					continue;
+				if (txq_data->elts_n != cnt) {
+					mlx5_txq_release(dev, i);
+					continue;
+				}
+				if (!txq_ctrl->is_hairpin)
+					txq_alloc_elts(txq_ctrl);
+				MLX5_ASSERT(!txq_ctrl->obj);
+				txq_ctrl->obj = mlx5_malloc_numa_tolerant(flags,
+					      sizeof(struct mlx5_txq_obj),
+					      0, txq_ctrl->socket);
+				if (!txq_ctrl->obj) {
+					DRV_LOG(ERR, "Port %u Tx queue %u cannot allocate "
+	 				    "memory resources.", dev->data->port_id,
+					     txq_data->idx);
 					rte_errno = ENOMEM;
 					goto error;
 				}
+				ret = priv->obj_ops.txq_obj_new(dev, i);
+				if (ret < 0) {
+					mlx5_free(txq_ctrl->obj);
+					txq_ctrl->obj = NULL;
+					goto error;
+				}
+				if (!txq_ctrl->is_hairpin) {
+					size_t size = txq_data->cqe_s * sizeof(*txq_data->fcqs);
+
+					txq_data->fcqs = mlx5_malloc_numa_tolerant(flags, size,
+						RTE_CACHE_LINE_SIZE,
+						txq_ctrl->socket);
+					if (!txq_data->fcqs) {
+						DRV_LOG(ERR, "Port %u Tx queue %u cannot "
+						      "allocate memory (FCQ).",
+						      dev->data->port_id, i);
+						rte_errno = ENOMEM;
+						goto error;
+					}
+				}
+				DRV_LOG(DEBUG, "Port %u txq %u updated with %p.",
+				    dev->data->port_id, i, (void *)&txq_ctrl->obj);
+				LIST_INSERT_HEAD(&priv->txqsobj, txq_ctrl->obj, next);
 			}
-			DRV_LOG(DEBUG, "Port %u txq %u updated with %p.",
-				dev->data->port_id, i, (void *)&txq_ctrl->obj);
-			LIST_INSERT_HEAD(&priv->txqsobj, txq_ctrl->obj, next);
+		}
 	}
-}
+	// Multi-user SQ
+	else {
+
+		// Master SQ dev creation
+
+		struct mlx5_txq_ctrl *master_txq_ctrl = mlx5_txq_get(dev, 0);
+		struct mlx5_txq_data *master_txq_data = &master_txq_ctrl->txq;
+
+		if (!master_txq_ctrl->is_hairpin)
+			txq_alloc_elts(master_txq_ctrl);
+		MLX5_ASSERT(!master_txq_ctrl->obj);
+		master_txq_ctrl->obj = mlx5_malloc_numa_tolerant(flags,
+					    sizeof(struct mlx5_txq_obj),
+					    0, master_txq_ctrl->socket);
+		if (!master_txq_ctrl->obj) {
+			DRV_LOG(ERR, "Port %u Tx queue %u cannot allocate "
+			   "memory resources.", dev->data->port_id,
+			   master_txq_data->idx);
+			rte_errno = ENOMEM;
+			goto error;
+		}
+		ret = priv->obj_ops.txq_obj_new(dev, 0);
+		if (ret < 0) {
+			mlx5_free(master_txq_ctrl->obj);
+			master_txq_ctrl->obj = NULL;
+			goto error;
+		}
+		if (!master_txq_ctrl->is_hairpin) {
+			size_t size = master_txq_data->cqe_s * sizeof(*master_txq_data->fcqs);
+
+			master_txq_data->fcqs = mlx5_malloc_numa_tolerant(flags, size,
+					      RTE_CACHE_LINE_SIZE,
+					      master_txq_ctrl->socket);
+			if (!master_txq_data->fcqs) {
+				DRV_LOG(ERR, "Port %u Tx queue %u cannot "
+				    "allocate memory (FCQ).",
+				    dev->data->port_id, 0);
+				rte_errno = ENOMEM;
+				goto error;
+			}
+		}
+		DRV_LOG(DEBUG, "Port %u txq %u updated with %p.",
+			  dev->data->port_id, 0, (void *)&master_txq_ctrl->obj);
+		LIST_INSERT_HEAD(&priv->txqsobj, master_txq_ctrl->obj, next);
+
+                for (i = 1; i != priv->txqs_n; ++i) {
+
+			struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, i);
+			struct mlx5_txq_data *txq_data = &txq_ctrl->txq;
+
+			txq_data->wqes = txq_ctrl->priv->sh->mu_group.wqes_base;
+			txq_data->uar_data = txq_ctrl->priv->sh->mu_group.uar;
+                }
+
+
+	}
 	return 0;
 error:
 	ret = rte_errno; /* Save rte_errno before cleanup. */
@@ -1155,6 +1215,7 @@ mlx5_hw_representor_port_allowed_start(struct rte_eth_dev *dev)
 static int mlx5_dev_allocate_consec_tx_mem(struct rte_eth_dev *dev)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
+	uint8_t log_mu_grp_size = dev->data->mu_sq_log_grp_size;
 	size_t alignment;
 	uint32_t total_size;
 	struct mlx5dv_devx_umem *umem_obj = NULL;
@@ -1170,7 +1231,14 @@ static int mlx5_dev_allocate_consec_tx_mem(struct rte_eth_dev *dev)
 	 * queue size alignment is bigger than doorbell alignment, no need to align or
 	 * round-up again. One queue have two DBs (for CQ + WQ).
 	 */
-	total_size += MLX5_DBR_SIZE * priv->txqs_n * 2;
+	if (log_mu_grp_size == 0) {
+		// there are txqs_n SQ DBRs + txqs_n CQ DBRs
+		total_size += MLX5_DBR_SIZE * priv->txqs_n * 2;
+	}
+	else {
+		// there are txqs_n SQ DBRs + 1 CQ DBR
+		total_size += MLX5_DBR_SIZE * priv->txqs_n + 1;
+	}
 	umem_buf = mlx5_malloc_numa_tolerant(MLX5_MEM_RTE | MLX5_MEM_ZERO, total_size,
 					     alignment, priv->sh->numa_node);
 	if (!umem_buf) {

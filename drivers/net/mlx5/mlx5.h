@@ -1512,6 +1512,12 @@ struct mlx5_dev_registers {
 	enum modify_reg nat64_regs[MLX5_FLOW_NAT64_REGS_MAX];
 };
 
+struct mlx5_shared_mu_group {
+	uint32_t master_sqn;
+	volatile struct mlx5_wqe *wqes_base;
+	struct mlx5_uar_data *uar;
+};
+
 #if defined(HAVE_MLX5DV_DR) && \
 	(defined(HAVE_MLX5_DR_CREATE_ACTION_FLOW_METER) || \
 	 defined(HAVE_MLX5_DR_CREATE_ACTION_ASO))
@@ -1661,6 +1667,7 @@ struct mlx5_dev_ctx_shared {
 	rte_spinlock_t cpool_lock;
 	LIST_HEAD(hws_cpool_list, mlx5_hws_cnt_pool) hws_cpool_list; /* Count pool list. */
 	struct mlx5_dev_registers registers;
+	struct mlx5_shared_mu_group mu_group;
 	struct mlx5_dev_shared_port port[]; /* per device port data array. */
 };
 
