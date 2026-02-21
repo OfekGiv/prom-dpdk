@@ -1129,7 +1129,7 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	struct mlx5_priv *priv = dev->data->dev_private;
 	struct mlx5_txq_ctrl *tmpl;
 	uint8_t log_mu_grp_size = dev->data->mu_sq_log_grp_size;
-	uint8_t mu_grp_size = 1U << log_mu_grp_size;
+	uint8_t mu_grp_size = log_mu_grp_size == 0 ? 0 : 1U << log_mu_grp_size;
 	uint16_t max_wqe;
 	uint32_t wqebb_cnt, log_desc_n;
 
@@ -1162,6 +1162,7 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 			goto error;
 	}
 	MLX5_ASSERT(desc > MLX5_TX_COMP_THRESH);
+	uint16_t mu_desc = desc >> log_mu_grp_size;
 	// Single user SQ
 	if (mu_grp_size == 0) {
 		tmpl->txq.offloads = conf->offloads |
@@ -1195,15 +1196,15 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 			priv->consec_tx_mem.sq_total_size += tmpl->txq.sq_mem_len;
 			priv->consec_tx_mem.cq_total_size += tmpl->txq.cq_mem_len;
 		}
+	}
 	// Multi-user SQ
-	} else {
+	else {
 		tmpl->txq.offloads = conf->offloads |
 			dev->data->dev_conf.txmode.offloads;
 		tmpl->priv = priv;
 		tmpl->socket = (socket == (unsigned int)SOCKET_ID_ANY ?
 			(unsigned int)dev->device->numa_node : socket);
 		// Multi-user group share the same queue, therefor desc is divided by group size
-		uint16_t mu_desc = desc >> log_mu_grp_size;
 		tmpl->txq.elts_n = log2above(mu_desc);
 		tmpl->txq.elts_s = mu_desc;
 		tmpl->txq.elts_m = mu_desc - 1;
