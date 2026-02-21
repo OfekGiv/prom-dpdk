@@ -141,6 +141,7 @@ struct __rte_cache_aligned rte_eth_dev_data {
 	struct rte_eth_link dev_link;   /**< Link-level information & status */
 	struct rte_eth_conf dev_conf;   /**< Configuration applied to device */
 	uint16_t mtu;                   /**< Maximum Transmission Unit */
+	uint8_t mu_sq_log_grp_size;         /**< Log of Multi-User group size */
 
 	/** Common Rx buffer size handled by all queues */
 	uint32_t min_rx_buf_size;
