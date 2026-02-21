@@ -153,16 +153,13 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 		DRV_LOG(DEBUG, "Port %u txq %u updated with %p.",
 			  dev->data->port_id, 0, (void *)&master_txq_ctrl->obj);
 		LIST_INSERT_HEAD(&priv->txqsobj, master_txq_ctrl->obj, next);
-
+/*
                 for (i = 1; i != priv->txqs_n; ++i) {
 
 			struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, i);
 			struct mlx5_txq_data *txq_data = &txq_ctrl->txq;
-
-			txq_data->wqes = txq_ctrl->priv->sh->mu_group.wqes_base;
-			txq_data->uar_data = txq_ctrl->priv->sh->mu_group.uar;
                 }
-
+*/
 
 	}
 	return 0;

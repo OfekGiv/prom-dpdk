@@ -1203,10 +1203,15 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 		tmpl->priv = priv;
 		tmpl->socket = (socket == (unsigned int)SOCKET_ID_ANY ?
 			(unsigned int)dev->device->numa_node : socket);
+		tmpl->txq.elts_n = log2above(desc);
+		tmpl->txq.elts_s = desc;
+		tmpl->txq.elts_m = desc - 1;
 		// Multi-user group share the same queue, therefor desc is divided by group size
+		/*
 		tmpl->txq.elts_n = log2above(mu_desc);
 		tmpl->txq.elts_s = mu_desc;
 		tmpl->txq.elts_m = mu_desc - 1;
+		*/
 		tmpl->txq.port_id = dev->data->port_id;
 		tmpl->txq.idx = idx;
 		txq_set_params(tmpl);
