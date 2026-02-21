@@ -79,6 +79,10 @@
 /* Device parameter to limit packet size to inline with Enhanced MPW. */
 #define MLX5_TXQ_INLINE_MPW "txq_inline_mpw"
 
+/* Device parameter to configure Multi-User SQ group size (log). */
+#define MLX5_MU_SQ_LOG_GRP_SIZE "mu_sq_log_grp_size"
+#define MLX5_MU_SQ_LOG_GRP_MAX_SIZE 7 /* Max group size is 128 (2 ^ 7) */
+
 /*
  * Device parameter to configure the number of TX queues threshold for
  * enabling inline send.
@@ -2793,6 +2797,13 @@ mlx5_port_args_check_handler(const char *key, const char *val, void *opaque)
 	} else if (strcmp(MLX5_DELAY_DROP, key) == 0) {
 		config->std_delay_drop = !!(tmp & MLX5_DELAY_DROP_STANDARD);
 		config->hp_delay_drop = !!(tmp & MLX5_DELAY_DROP_HAIRPIN);
+	} else if (strcmp(MLX5_MU_SQ_LOG_GRP_SIZE, key) == 0) {
+		if (tmp < 0 || tmp > MLX5_MU_SQ_LOG_GRP_MAX_SIZE) {
+			rte_errno = EINVAL;
+			DRV_LOG(ERR, "Invalid mu_sq_log_grp_size %ld", tmp);
+			return -rte_errno;
+		}
+		config->mu_sq_log_grp_size = (uint8_t)tmp;
 	}
 	return 0;
 }
@@ -2841,6 +2852,7 @@ mlx5_port_args_config(struct mlx5_priv *priv, struct mlx5_kvargs_ctrl *mkvlist,
 		MLX5_LRO_TIMEOUT_USEC,
 		MLX5_HP_BUF_SIZE,
 		MLX5_DELAY_DROP,
+		MLX5_MU_SQ_LOG_GRP_SIZE,
 		NULL,
 	};
 	int ret = 0;
@@ -2861,6 +2873,7 @@ mlx5_port_args_config(struct mlx5_priv *priv, struct mlx5_kvargs_ctrl *mkvlist,
 	config->log_hp_size = MLX5_ARG_UNSET;
 	config->std_delay_drop = 0;
 	config->hp_delay_drop = 0;
+	config->mu_sq_log_grp_size = 0;
 	if (mkvlist != NULL) {
 		/* Process parameters. */
 		ret = mlx5_kvargs_process(mkvlist, params,
@@ -3037,6 +3050,7 @@ mlx5_port_args_set_used(const char *name, uint16_t port_id,
 		MLX5_LRO_TIMEOUT_USEC,
 		MLX5_HP_BUF_SIZE,
 		MLX5_DELAY_DROP,
+		MLX5_MU_SQ_LOG_GRP_SIZE,
 		NULL,
 	};
 

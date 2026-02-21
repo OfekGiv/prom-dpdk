@@ -371,6 +371,7 @@ struct mlx5_port_config {
 	int txq_inline_min; /* Minimal amount of data bytes to inline. */
 	int txq_inline_max; /* Max packet size for inlining with SEND. */
 	int txq_inline_mpw; /* Max packet size for inlining with eMPW. */
+	uint8_t mu_sq_log_grp_size; /* Log of Multi-User SQ group size */
 };
 
 /*
