@@ -23,6 +23,7 @@
 #include <mlx5_common_mr.h>
 #include <mlx5_malloc.h>
 
+#include "baseband/acc/acc_common.h"
 #include "mlx5_defs.h"
 #include "mlx5_utils.h"
 #include "mlx5.h"
@@ -1127,6 +1128,8 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	int ret;
 	struct mlx5_priv *priv = dev->data->dev_private;
 	struct mlx5_txq_ctrl *tmpl;
+	uint8_t log_mu_grp_size = dev->data->mu_sq_log_grp_size;
+	uint8_t mu_grp_size = 1U << log_mu_grp_size;
 	uint16_t max_wqe;
 	uint32_t wqebb_cnt, log_desc_n;
 
@@ -1159,36 +1162,87 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 			goto error;
 	}
 	MLX5_ASSERT(desc > MLX5_TX_COMP_THRESH);
-	tmpl->txq.offloads = conf->offloads |
-			     dev->data->dev_conf.txmode.offloads;
-	tmpl->priv = priv;
-	tmpl->socket = (socket == (unsigned int)SOCKET_ID_ANY ?
+	// Single user SQ
+	if (mu_grp_size == 0) {
+		tmpl->txq.offloads = conf->offloads |
+			dev->data->dev_conf.txmode.offloads;
+		tmpl->priv = priv;
+		tmpl->socket = (socket == (unsigned int)SOCKET_ID_ANY ?
 			(unsigned int)dev->device->numa_node : socket);
-	tmpl->txq.elts_n = log2above(desc);
-	tmpl->txq.elts_s = desc;
-	tmpl->txq.elts_m = desc - 1;
-	tmpl->txq.port_id = dev->data->port_id;
-	tmpl->txq.idx = idx;
-	txq_set_params(tmpl);
-	txq_adjust_params(tmpl);
-	wqebb_cnt = txq_calc_wqebb_cnt(tmpl, !!mlx5_devx_obj_ops_en(priv->sh));
-	max_wqe = mlx5_dev_get_max_wq_size(priv->sh);
-	if (wqebb_cnt > max_wqe) {
-		DRV_LOG(ERR,
-			"port %u Tx WQEBB count (%d) exceeds the limit (%d),"
-			" try smaller queue size",
-			dev->data->port_id, wqebb_cnt, max_wqe);
-		rte_errno = ENOMEM;
-		goto error;
-	}
-	if (priv->sh->config.txq_mem_algn != 0) {
-		log_desc_n = log2above(wqebb_cnt);
-		tmpl->txq.sq_mem_len = mlx5_txq_wq_mem_length(log_desc_n);
-		tmpl->txq.cq_mem_len = mlx5_txq_cq_mem_length(dev, tmpl);
-		DRV_LOG(DEBUG, "Port %u TxQ %u WQ length %u, CQ length %u before align.",
-			dev->data->port_id, idx, tmpl->txq.sq_mem_len, tmpl->txq.cq_mem_len);
-		priv->consec_tx_mem.sq_total_size += tmpl->txq.sq_mem_len;
-		priv->consec_tx_mem.cq_total_size += tmpl->txq.cq_mem_len;
+		tmpl->txq.elts_n = log2above(desc);
+		tmpl->txq.elts_s = desc;
+		tmpl->txq.elts_m = desc - 1;
+		tmpl->txq.port_id = dev->data->port_id;
+		tmpl->txq.idx = idx;
+		txq_set_params(tmpl);
+		txq_adjust_params(tmpl);
+		wqebb_cnt = txq_calc_wqebb_cnt(tmpl, !!mlx5_devx_obj_ops_en(priv->sh));
+		max_wqe = mlx5_dev_get_max_wq_size(priv->sh);
+		if (wqebb_cnt > max_wqe) {
+			DRV_LOG(ERR,
+	   			"port %u Tx WQEBB count (%d) exceeds the limit (%d),"
+			        " try smaller queue size",
+			        dev->data->port_id, wqebb_cnt, max_wqe);
+			rte_errno = ENOMEM;
+			goto error;
+		}
+		if (priv->sh->config.txq_mem_algn != 0) {
+			log_desc_n = log2above(wqebb_cnt);
+			tmpl->txq.sq_mem_len = mlx5_txq_wq_mem_length(log_desc_n);
+			tmpl->txq.cq_mem_len = mlx5_txq_cq_mem_length(dev, tmpl);
+			DRV_LOG(DEBUG, "Port %u TxQ %u WQ length %u, CQ length %u before align.",
+				   dev->data->port_id, idx, tmpl->txq.sq_mem_len, tmpl->txq.cq_mem_len);
+			priv->consec_tx_mem.sq_total_size += tmpl->txq.sq_mem_len;
+			priv->consec_tx_mem.cq_total_size += tmpl->txq.cq_mem_len;
+		}
+	// Multi-user SQ
+	} else {
+		tmpl->txq.offloads = conf->offloads |
+			dev->data->dev_conf.txmode.offloads;
+		tmpl->priv = priv;
+		tmpl->socket = (socket == (unsigned int)SOCKET_ID_ANY ?
+			(unsigned int)dev->device->numa_node : socket);
+		// Multi-user group share the same queue, therefor desc is divided by group size
+		uint16_t mu_desc = desc >> log_mu_grp_size;
+		tmpl->txq.elts_n = log2above(mu_desc);
+		tmpl->txq.elts_s = mu_desc;
+		tmpl->txq.elts_m = mu_desc - 1;
+		tmpl->txq.port_id = dev->data->port_id;
+		tmpl->txq.idx = idx;
+		txq_set_params(tmpl);
+		txq_adjust_params(tmpl);
+		// Master SQ is always at index 0
+		if (idx == 0) {
+			wqebb_cnt = txq_calc_wqebb_cnt(tmpl, !!mlx5_devx_obj_ops_en(priv->sh));
+			max_wqe = mlx5_dev_get_max_wq_size(priv->sh);
+			if (wqebb_cnt > max_wqe) {
+				DRV_LOG(ERR,
+				    "port %u Tx WQEBB count (%d) exceeds the limit (%d),"
+				    " try smaller queue size",
+				    dev->data->port_id, wqebb_cnt, max_wqe);
+				rte_errno = ENOMEM;
+				goto error;
+			}
+			if (priv->sh->config.txq_mem_algn != 0) {
+				log_desc_n = log2above(wqebb_cnt);
+				tmpl->txq.sq_mem_len = mlx5_txq_wq_mem_length(log_desc_n);
+				tmpl->txq.cq_mem_len = mlx5_txq_cq_mem_length(dev, tmpl);
+				DRV_LOG(DEBUG, "Port %u Master TxQ %u WQ length %u, CQ length %u before align.",
+				    dev->data->port_id, idx, tmpl->txq.sq_mem_len, tmpl->txq.cq_mem_len);
+				priv->consec_tx_mem.sq_total_size += tmpl->txq.sq_mem_len;
+				priv->consec_tx_mem.cq_total_size += tmpl->txq.cq_mem_len;
+			}
+
+		}
+		// All others are slave SQs
+		else {
+			tmpl->txq.sq_mem_len = 0;
+			tmpl->txq.cq_mem_len = 0;
+			DRV_LOG(DEBUG, "Port %u Slave TxQ %u WQ length %u, CQ length %u before align.",
+			   dev->data->port_id, idx, tmpl->txq.sq_mem_len, tmpl->txq.cq_mem_len);
+
+		}
+
 	}
 	rte_atomic_fetch_add_explicit(&tmpl->refcnt, 1, rte_memory_order_relaxed);
 	tmpl->is_hairpin = false;
