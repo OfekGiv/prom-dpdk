@@ -2619,6 +2619,11 @@ rte_eth_tx_queue_setup(uint16_t port_id, uint16_t tx_queue_id,
 	RTE_ETH_VALID_PORTID_OR_ERR_RET(port_id, -ENODEV);
 	dev = &rte_eth_devices[port_id];
 
+
+	// TODO: Remove
+	// Change group size to 8
+	dev->data->mu_sq_log_grp_size = 3;
+
 	if (tx_queue_id >= dev->data->nb_tx_queues) {
 		RTE_ETHDEV_LOG_LINE(ERR, "Invalid Tx queue_id=%u", tx_queue_id);
 		return -EINVAL;
