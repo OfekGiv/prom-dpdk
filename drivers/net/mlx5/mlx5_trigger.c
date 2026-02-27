@@ -134,7 +134,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 		if (ret < 0) {
 			mlx5_free(master_txq_ctrl->obj);
 			master_txq_ctrl->obj = NULL;
-			goto error;
+		goto error;
 		}
 		if (!master_txq_ctrl->is_hairpin) {
 			size_t size = master_txq_data->cqe_s * sizeof(*master_txq_data->fcqs);
@@ -153,13 +153,43 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 		DRV_LOG(DEBUG, "Port %u txq %u updated with %p.",
 			  dev->data->port_id, 0, (void *)&master_txq_ctrl->obj);
 		LIST_INSERT_HEAD(&priv->txqsobj, master_txq_ctrl->obj, next);
-/*
-                for (i = 1; i != priv->txqs_n; ++i) {
+
+                for (unsigned int i = 1; i != priv->txqs_n; ++i) {
 
 			struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, i);
 			struct mlx5_txq_data *txq_data = &txq_ctrl->txq;
+			struct mlx5_priv *priv = dev->data->dev_private;
+			struct mlx5_dev_ctx_shared *sh = priv->sh;
+			struct mlx5_proc_priv *ppriv = MLX5_PROC_PRIV(PORT_ID(priv));
+			struct mlx5_txq_ctrl *master_txq_ctrl = mlx5_txq_get(dev, 0);
+			struct mlx5_txq_data *master_txq_data = &master_txq_ctrl->txq;
+			struct mlx5_txq_obj *master_txq_obj = master_txq_ctrl->obj;
+
+			// Memory structure:
+			// < Master WQ + CQ > < Master CQ DBR > < Master SQ DBR > < Slave i SQ DBR >
+			txq_data->qp_db = master_txq_obj->sq_obj.db_rec + (i + 1) * MLX5_DBR_SIZE;
+			*txq_data->qp_db = 0;
+			ppriv->uar_table[txq_data->idx] = sh->tx_uar.bf_db;
+
+			/* Create the Work Queue. */
+			txq_data->wqe_n = master_txq_data->wqe_n;
+			txq_data->wqe_s = master_txq_data->wqe_s;
+			txq_data->wqe_m = master_txq_data->wqe_m;
+			txq_data->wqes = master_txq_data->wqes;
+			txq_data->wqes_end = master_txq_data->wqes_end;
+			txq_data->wqe_ci = 0;
+			txq_data->wqe_pi = 0;
+			txq_data->wqe_comp = 0;
+			txq_data->wqe_thres = master_txq_data->wqe_thres;
+			/*
+			txq_data->qp_num_8s = txq_obj->sq_obj.sq->id << 8;
+			txq_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
+			txq_data->db_nc = sh->tx_uar.dbnc;
+			txq_data->wait_on_time = !!(!sh->config.tx_pp &&
+				sh->cdev->config.hca_attr.wait_on_time);
+			*/
                 }
-*/
+
 
 	}
 	return 0;

@@ -1606,7 +1606,7 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 		cq_attr.umem = priv->consec_tx_mem.umem;
 		cq_attr.umem_obj = priv->consec_tx_mem.umem_obj;
 		cq_attr.q_off = priv->consec_tx_mem.cq_cur_off;
-		cq_attr.db_off = db_start + (2 * idx + 1) * MLX5_DBR_SIZE;
+		cq_attr.db_off = db_start;
 		cq_attr.q_len = txq_data->cq_mem_len;
 	}
 	/* Create completion queue object with DevX. */
@@ -1697,10 +1697,10 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 		priv->consec_tx_mem.cq_cur_off += txq_data->cq_mem_len;
 	ppriv->uar_table[txq_data->idx] = sh->tx_uar.bf_db;
 	dev->data->tx_queue_state[idx] = RTE_ETH_QUEUE_STATE_STARTED;
-
-	priv->sh->mu_group.master_sqn = txq_obj->sq_obj.sq->id;
-	priv->sh->mu_group.wqes_base = txq_obj->sq_obj.wqes;
 	priv->sh->mu_group.uar = &sh->tx_uar.bf_db;
+
+	//priv->sh->mu_group.master_sqn = txq_obj->sq_obj.sq->id;
+	//priv->sh->mu_group.wqes_base = txq_obj->sq_obj.wqes;
 
 	/* Notify external users that Tx queue was created. */
 	mlx5_driver_event_notify_txq_create(txq_ctrl);

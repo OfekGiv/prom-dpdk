@@ -3580,7 +3580,9 @@ send_loop:
 	 * - doorbell the NIC about processed CQEs
 	 */
 	rte_prefetch0(*(pkts + loc.pkts_sent));
-	mlx5_tx_handle_completion(txq, olx);
+	// In multi-user mode, only master processes CQEs
+	if (txq->idx == 0)
+		mlx5_tx_handle_completion(txq, olx);
 	/*
 	 * Calculate the number of available resources - elts and WQEs.
 	 * There are two possible different scenarios:
@@ -3763,11 +3765,13 @@ enter_send_single:
 	/* Take a shortcut if nothing is sent. */
 	if (unlikely(loc.pkts_sent == loc.pkts_loop))
 		goto burst_exit;
-	/* Request CQE generation if limits are reached. */
-	if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
-		mlx5_tx_request_completion_trace(txq, &loc, olx);
-	else
-		mlx5_tx_request_completion(txq, &loc, olx);
+	if (txq->idx == 0) {
+		/* Request CQE generation if limits are reached. */
+		if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
+			mlx5_tx_request_completion_trace(txq, &loc, olx);
+		else
+			mlx5_tx_request_completion(txq, &loc, olx);
+	}
 	/*
 	 * Ring QP doorbell immediately after WQE building completion
 	 * to improve latencies. The pure software related data treatment
