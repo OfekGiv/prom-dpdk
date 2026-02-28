@@ -22,6 +22,7 @@
 #include "mlx5_autoconf.h"
 #include "mlx5_rxtx.h"
 #include "mlx5_trace.h"
+#include "rte_lcore.h"
 
 /* TX burst subroutines return codes. */
 enum mlx5_txcmp_code {
@@ -2777,7 +2778,8 @@ next_empw:
 		}
 		if (likely(part > 1))
 			rte_prefetch0(*pkts);
-		loc->wqe_last = txq->wqes + (txq->wqe_ci & txq->wqe_m);
+		unsigned int multi_user_spacing = txq->wqe_ci * txq->sh->mu_group.group_size + txq->idx * 9;
+		loc->wqe_last = txq->wqes + (multi_user_spacing & txq->wqe_m);
 		/*
 		 * Build eMPW title WQEBB:
 		 * - Control Segment, eMPW opcode
@@ -3581,6 +3583,7 @@ send_loop:
 	 */
 	rte_prefetch0(*(pkts + loc.pkts_sent));
 	// In multi-user mode, only master processes CQEs
+	// TODO: Check if multi-user is enabled
 	if (txq->idx == 0)
 		mlx5_tx_handle_completion(txq, olx);
 	/*
@@ -3799,7 +3802,7 @@ enter_send_single:
 	 *   packets are coming and the write barrier will be issued on
 	 *   the next burst (after descriptor writing, at least).
 	 */
-	mlx5_doorbell_ring(mlx5_tx_bfreg(txq),
+	mlx5_doorbell_ring(txq->sh->mu_group.uar,
 			   *(volatile uint64_t *)loc.wqe_last, txq->wqe_ci,
 			   txq->qp_db, !txq->db_nc &&
 			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));

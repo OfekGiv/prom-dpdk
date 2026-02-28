@@ -57,6 +57,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 	unsigned int i, cnt;
 	int ret;
 
+	priv->sh->mu_group.group_size = 1 << log_mu_grp_size;
 	// Single-user SQ
 	if (log_mu_grp_size == 0) {
 		for (cnt = log_max_wqe; cnt > 0; cnt -= 1) {
@@ -181,13 +182,12 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			txq_data->wqe_pi = 0;
 			txq_data->wqe_comp = 0;
 			txq_data->wqe_thres = master_txq_data->wqe_thres;
-			/*
-			txq_data->qp_num_8s = txq_obj->sq_obj.sq->id << 8;
+			txq_data->qp_num_8s = (master_txq_obj->sq_obj.sq->id + i) << 8;
 			txq_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
 			txq_data->db_nc = sh->tx_uar.dbnc;
 			txq_data->wait_on_time = !!(!sh->config.tx_pp &&
 				sh->cdev->config.hca_attr.wait_on_time);
-			*/
+
                 }
 
 
@@ -1434,6 +1434,8 @@ continue_dev_start:
 		SAVE_RTE_ERRNO_AND_STOP(ret, dev);
 		goto lb_dummy_queue_release;
 	}
+
+	dev->data->mu_sq_log_grp_size = priv->config.mu_sq_log_grp_size;
 	ret = mlx5_txq_start(dev);
 	if (ret) {
 		DRV_LOG(ERR, "port %u Tx queue allocation failed: %s",

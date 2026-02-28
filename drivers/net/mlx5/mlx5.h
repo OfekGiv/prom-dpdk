@@ -1515,6 +1515,7 @@ struct mlx5_dev_registers {
 
 struct mlx5_shared_mu_group {
 	uint32_t master_sqn;
+	uint32_t group_size;
 	volatile struct mlx5_wqe *wqes_base;
 	struct mlx5_uar_data *uar;
 };
