@@ -3,6 +3,7 @@
  * Copyright 2015 Mellanox Technologies, Ltd
  */
 
+#include <infiniband/mlx5dv.h>
 #include <unistd.h>
 
 #include <rte_ether.h>
@@ -54,7 +55,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 	uint8_t log_mu_grp_size = dev->data->mu_sq_log_grp_size;
 	uint32_t log_max_wqe = log2above(mlx5_dev_get_max_wq_size(priv->sh));
 	uint32_t flags = MLX5_MEM_RTE | MLX5_MEM_ZERO;
-	unsigned int i, cnt;
+	unsigned int i=0, cnt;
 	int ret;
 
 	priv->sh->mu_group.group_size = 1 << log_mu_grp_size;
@@ -155,9 +156,9 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			  dev->data->port_id, 0, (void *)&master_txq_ctrl->obj);
 		LIST_INSERT_HEAD(&priv->txqsobj, master_txq_ctrl->obj, next);
 
-                for (unsigned int i = 1; i != priv->txqs_n; ++i) {
+                for (unsigned int idx = 1; idx != priv->txqs_n; ++idx) {
 
-			struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, i);
+			struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, idx);
 			struct mlx5_txq_data *txq_data = &txq_ctrl->txq;
 			struct mlx5_priv *priv = dev->data->dev_private;
 			struct mlx5_dev_ctx_shared *sh = priv->sh;
@@ -168,7 +169,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 
 			// Memory structure:
 			// < Master WQ + CQ > < Master CQ DBR > < Master SQ DBR > < Slave i SQ DBR >
-			txq_data->qp_db = master_txq_obj->sq_obj.db_rec + (i + 1) * MLX5_DBR_SIZE;
+			txq_data->qp_db = &(master_txq_obj->sq_obj.db_rec + (idx + 1) * MLX5_DBR_SIZE)[MLX5_SND_DBR];
 			*txq_data->qp_db = 0;
 			ppriv->uar_table[txq_data->idx] = sh->tx_uar.bf_db;
 
@@ -182,7 +183,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			txq_data->wqe_pi = 0;
 			txq_data->wqe_comp = 0;
 			txq_data->wqe_thres = master_txq_data->wqe_thres;
-			txq_data->qp_num_8s = (master_txq_obj->sq_obj.sq->id + i) << 8;
+			txq_data->qp_num_8s = (master_txq_obj->sq_obj.sq->id + idx) << 8;
 			txq_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
 			txq_data->db_nc = sh->tx_uar.dbnc;
 			txq_data->wait_on_time = !!(!sh->config.tx_pp &&

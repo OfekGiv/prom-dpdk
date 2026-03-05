@@ -3802,8 +3802,9 @@ enter_send_single:
 	 *   packets are coming and the write barrier will be issued on
 	 *   the next burst (after descriptor writing, at least).
 	 */
+	uint32_t wqe_ci_by_core = txq->wqe_ci + 9*txq->idx;
 	mlx5_doorbell_ring(txq->sh->mu_group.uar,
-			   *(volatile uint64_t *)loc.wqe_last, txq->wqe_ci,
+			   *(volatile uint64_t *)loc.wqe_last, wqe_ci_by_core,
 			   txq->qp_db, !txq->db_nc &&
 			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
 	/* Not all of the mbufs may be stored into elts yet. */

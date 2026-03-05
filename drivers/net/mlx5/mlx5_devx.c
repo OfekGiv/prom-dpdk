@@ -1606,6 +1606,7 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 		cq_attr.umem = priv->consec_tx_mem.umem;
 		cq_attr.umem_obj = priv->consec_tx_mem.umem_obj;
 		cq_attr.q_off = priv->consec_tx_mem.cq_cur_off;
+		// TODO: Add supoort for single-user mode
 		cq_attr.db_off = db_start;
 		cq_attr.q_len = txq_data->cq_mem_len;
 	}
@@ -1666,7 +1667,8 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	txq_data->wqe_pi = 0;
 	txq_data->wqe_comp = 0;
 	txq_data->wqe_thres = txq_data->wqe_s / MLX5_TX_COMP_THRESH_INLINE_DIV;
-	txq_data->qp_db = &txq_obj->sq_obj.db_rec[MLX5_SND_DBR];
+	volatile uint8_t * dbr_offset = (volatile uint8_t*)(txq_obj->sq_obj.db_rec) + MLX5_DBR_SIZE;
+	txq_data->qp_db = &((volatile uint32_t *)dbr_offset)[MLX5_SND_DBR];
 	*txq_data->qp_db = 0;
 	txq_data->qp_num_8s = txq_obj->sq_obj.sq->id << 8;
 	txq_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
