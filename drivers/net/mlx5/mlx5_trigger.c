@@ -171,6 +171,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 
 			// Memory structure:
 			// < Master WQ + CQ > < Master CQ DBR > < Master SQ DBR > < Slave i SQ DBR >
+			txq_ctrl->is_master = false;
 			txq_data->qp_db = RTE_PTR_ADD(master_txq_obj->sq_obj.db_rec, (idx * MLX5_DBR_SIZE));
 			txq_data->qp_db = &txq_data->qp_db[MLX5_SND_DBR];
 			*txq_data->qp_db = 0;

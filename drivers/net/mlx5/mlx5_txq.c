@@ -1167,6 +1167,7 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 		tmpl->txq.offloads = conf->offloads |
 			dev->data->dev_conf.txmode.offloads;
 		tmpl->priv = priv;
+		tmpl->is_master = true;
 		tmpl->socket = (socket == (unsigned int)SOCKET_ID_ANY ?
 			(unsigned int)dev->device->numa_node : socket);
 		tmpl->txq.elts_n = log2above(desc);
@@ -1395,6 +1396,8 @@ mlx5_txq_release(struct rte_eth_dev *dev, uint16_t idx)
 	if (priv->txqs == NULL || (*priv->txqs)[idx] == NULL)
 		return 0;
 	txq_ctrl = container_of((*priv->txqs)[idx], struct mlx5_txq_ctrl, txq);
+	if (!txq_ctrl->is_master)
+		return 0;
 	if (rte_atomic_fetch_sub_explicit(&txq_ctrl->refcnt, 1, rte_memory_order_relaxed) - 1 > 1)
 		return 1;
 	if (txq_ctrl->obj) {
