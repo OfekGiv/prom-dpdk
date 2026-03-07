@@ -53,6 +53,7 @@ static int
 mlx5_txq_start(struct rte_eth_dev *dev)
 {
 	struct mlx5_priv *priv = dev->data->dev_private;
+	struct mlx5_txq_ctrl *master_txq_ctrl;
 	uint8_t log_mu_grp_size = dev->data->mu_sq_log_grp_size;
 	uint32_t log_max_wqe = log2above(mlx5_dev_get_max_wq_size(priv->sh));
 	uint32_t flags = MLX5_MEM_RTE | MLX5_MEM_ZERO;
@@ -118,7 +119,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 
 		// Master SQ dev creation
 
-		struct mlx5_txq_ctrl *master_txq_ctrl = mlx5_txq_get(dev, 0);
+		master_txq_ctrl = mlx5_txq_get(dev, 0);
 		struct mlx5_txq_data *master_txq_data = &master_txq_ctrl->txq;
 
 		if (!master_txq_ctrl->is_hairpin)
@@ -165,7 +166,6 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			struct mlx5_priv *priv = dev->data->dev_private;
 			struct mlx5_dev_ctx_shared *sh = priv->sh;
 			struct mlx5_proc_priv *ppriv = MLX5_PROC_PRIV(PORT_ID(priv));
-			struct mlx5_txq_ctrl *master_txq_ctrl = mlx5_txq_get(dev, 0);
 			struct mlx5_txq_data *master_txq_data = &master_txq_ctrl->txq;
 			struct mlx5_txq_obj *master_txq_obj = master_txq_ctrl->obj;
 
@@ -192,10 +192,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			txq_data->db_nc = sh->tx_uar.dbnc;
 			txq_data->wait_on_time = !!(!sh->config.tx_pp &&
 				sh->cdev->config.hca_attr.wait_on_time);
-
                 }
-
-
 	}
 	return 0;
 error:
