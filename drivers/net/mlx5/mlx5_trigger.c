@@ -19,6 +19,7 @@
 #include "mlx5_rx.h"
 #include "mlx5_tx.h"
 #include "mlx5_utils.h"
+#include "rte_common.h"
 #include "rte_pmd_mlx5.h"
 
 static void mlx5_traffic_disable_legacy(struct rte_eth_dev *dev);
@@ -58,6 +59,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 	unsigned int i=0, cnt;
 	int ret;
 
+	priv->sh->mu_group.log_group_size = log_mu_grp_size;
 	priv->sh->mu_group.group_size = 1 << log_mu_grp_size;
 	// Single-user SQ
 	if (log_mu_grp_size == 0) {
@@ -169,7 +171,8 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 
 			// Memory structure:
 			// < Master WQ + CQ > < Master CQ DBR > < Master SQ DBR > < Slave i SQ DBR >
-			txq_data->qp_db = &(master_txq_obj->sq_obj.db_rec + (idx + 1) * MLX5_DBR_SIZE)[MLX5_SND_DBR];
+			txq_data->qp_db = RTE_PTR_ADD(master_txq_obj->sq_obj.db_rec, (idx * MLX5_DBR_SIZE));
+			txq_data->qp_db = &txq_data->qp_db[MLX5_SND_DBR];
 			*txq_data->qp_db = 0;
 			ppriv->uar_table[txq_data->idx] = sh->tx_uar.bf_db;
 
@@ -1265,7 +1268,7 @@ static int mlx5_dev_allocate_consec_tx_mem(struct rte_eth_dev *dev)
 	}
 	else {
 		// there are txqs_n SQ DBRs + 1 CQ DBR
-		total_size += MLX5_DBR_SIZE * priv->txqs_n + 1;
+		total_size += MLX5_DBR_SIZE * (priv->txqs_n + 1);
 	}
 	umem_buf = mlx5_malloc_numa_tolerant(MLX5_MEM_RTE | MLX5_MEM_ZERO, total_size,
 					     alignment, priv->sh->numa_node);

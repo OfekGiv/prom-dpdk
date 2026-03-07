@@ -2740,6 +2740,7 @@ mlx5_tx_burst_empw_simple(struct mlx5_txq_data *__rte_restrict txq,
 	MLX5_ASSERT(pkts_n > loc->pkts_sent);
 	pkts += loc->pkts_sent + 1;
 	pkts_n -= loc->pkts_sent;
+	uint32_t log_group_size = txq->sh->mu_group.log_group_size;
 	for (;;) {
 		struct mlx5_wqe_dseg *__rte_restrict dseg;
 		struct mlx5_wqe_eseg *__rte_restrict eseg;
@@ -2778,8 +2779,8 @@ next_empw:
 		}
 		if (likely(part > 1))
 			rte_prefetch0(*pkts);
-		unsigned int multi_user_spacing = txq->wqe_ci * txq->sh->mu_group.group_size + txq->idx * 9;
-		loc->wqe_last = txq->wqes + (multi_user_spacing & txq->wqe_m);
+		//unsigned int multi_user_spacing = txq->wqe_ci * txq->sh->mu_group.group_size + txq->idx * 9;
+		loc->wqe_last = txq->wqes + (txq->wqe_ci & txq->wqe_m);
 		/*
 		 * Build eMPW title WQEBB:
 		 * - Control Segment, eMPW opcode
@@ -2882,7 +2883,7 @@ next_empw:
 #endif
 		loc->elts_free -= part;
 		loc->pkts_sent += part;
-		txq->wqe_ci += (2 + part + 3) / 4;
+		txq->wqe_ci = txq->wqe_ci + (((2 + part + 3) / 4) << log_group_size);
 		loc->wqe_free -= (2 + part + 3) / 4;
 		pkts_n -= part;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
@@ -3802,9 +3803,9 @@ enter_send_single:
 	 *   packets are coming and the write barrier will be issued on
 	 *   the next burst (after descriptor writing, at least).
 	 */
-	uint32_t wqe_ci_by_core = txq->wqe_ci + 9*txq->idx;
+	//uint32_t wqe_ci_by_core = txq->wqe_ci + 9*txq->idx;
 	mlx5_doorbell_ring(txq->sh->mu_group.uar,
-			   *(volatile uint64_t *)loc.wqe_last, wqe_ci_by_core,
+			   *(volatile uint64_t *)loc.wqe_last, txq->wqe_ci,
 			   txq->qp_db, !txq->db_nc &&
 			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
 	/* Not all of the mbufs may be stored into elts yet. */
