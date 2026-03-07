@@ -1396,11 +1396,9 @@ mlx5_txq_release(struct rte_eth_dev *dev, uint16_t idx)
 	if (priv->txqs == NULL || (*priv->txqs)[idx] == NULL)
 		return 0;
 	txq_ctrl = container_of((*priv->txqs)[idx], struct mlx5_txq_ctrl, txq);
-	if (!txq_ctrl->is_master)
-		return 0;
 	if (rte_atomic_fetch_sub_explicit(&txq_ctrl->refcnt, 1, rte_memory_order_relaxed) - 1 > 1)
 		return 1;
-	if (txq_ctrl->obj) {
+	if (txq_ctrl->obj && txq_ctrl->is_master) {
 		priv->obj_ops.txq_obj_release(txq_ctrl->obj);
 		LIST_REMOVE(txq_ctrl->obj, next);
 		mlx5_free(txq_ctrl->obj);
