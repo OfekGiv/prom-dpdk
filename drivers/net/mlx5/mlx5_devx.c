@@ -1540,7 +1540,7 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 				  log_desc_n, &sq_attr, priv->sh->numa_node);
 	printf("\n");
 	for (unsigned int i = 0; i < (1U << log_mu_grp_size); i++){
-		printf("txq %u is assigned with SQN %u\n", i, txq_obj->sq_obj.sq->id + i);
+		printf("txq %u is assigned with SQN 0x%x\n", i, txq_obj->sq_obj.sq->id + i);
 	}
 	if (!ret && priv->sh->config.txq_mem_algn)
 		priv->consec_tx_mem.sq_cur_off += txq_data->sq_mem_len;
@@ -1668,12 +1668,17 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	txq_data->wqes = (struct mlx5_wqe *)(uintptr_t)txq_obj->sq_obj.wqes;
 	txq_data->wqes_end = txq_data->wqes + txq_data->wqe_s;
 	txq_data->wqe_ci = 0;
+	txq_data->wqe_ci_slave = 9;
 	txq_data->wqe_pi = 0;
 	txq_data->wqe_comp = 0;
 	txq_data->wqe_thres = txq_data->wqe_s / MLX5_TX_COMP_THRESH_INLINE_DIV;
 	txq_data->qp_db = &txq_obj->sq_obj.db_rec[MLX5_SND_DBR];
 	*txq_data->qp_db = 0;
+	txq_data->slave_qp_db = RTE_PTR_ADD(txq_obj->sq_obj.db_rec, MLX5_DBR_SIZE);
+	txq_data->slave_qp_db = &txq_data->slave_qp_db[MLX5_SND_DBR];
+	*txq_data->slave_qp_db = 0;
 	txq_data->qp_num_8s = txq_obj->sq_obj.sq->id << 8;
+	txq_data->slave_qp_num_8s = (txq_obj->sq_obj.sq->id + 1) << 8;
 	txq_data->db_heu = sh->cdev->config.dbnc == MLX5_SQ_DB_HEURISTIC;
 	txq_data->db_nc = sh->tx_uar.dbnc;
 	txq_data->wait_on_time = !!(!sh->config.tx_pp &&

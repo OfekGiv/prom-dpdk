@@ -79,7 +79,7 @@ uint16_t mlx5_tx_burst_##func(void *txq, \
 	return mlx5_tx_burst_tmpl((struct mlx5_txq_data *)txq, \
 		    pkts, pkts_n, (olx)); \
 }
-
+static bool flip_flag = true;
 /* Mbuf dynamic flag offset for inline. */
 extern uint64_t rte_net_mlx5_dynf_inline_mask;
 #define RTE_MBUF_F_TX_DYNF_NOINLINE rte_net_mlx5_dynf_inline_mask
@@ -120,7 +120,9 @@ struct __rte_cache_aligned mlx5_txq_data {
 	uint16_t elts_s; /* Number of mbuf elements. */
 	uint16_t elts_m; /* Mask for mbuf elements indices. */
 	/* Fields related to elts mbuf storage. */
+	uint16_t wqe_idx; /* Index for work queue element position in the SQ. */
 	uint16_t wqe_ci; /* Consumer index for work queue. */
+	uint16_t wqe_ci_slave; /* Consumer index for work queue. */
 	uint16_t wqe_pi; /* Producer index for work queue. */
 	uint16_t wqe_s; /* Number of WQ elements. */
 	uint16_t wqe_m; /* Mask Number for WQ elements. */
@@ -150,6 +152,7 @@ struct __rte_cache_aligned mlx5_txq_data {
 	uint16_t inlen_mode; /* Minimal data length to inline. */
 	uint8_t tx_aggr_affinity; /* TxQ affinity configuration. */
 	uint32_t qp_num_8s; /* QP number shifted by 8. */
+	uint32_t slave_qp_num_8s; /* QP number shifted by 8. */
 	uint32_t sq_mem_len; /* Length of TxQ for WQEs */
 	uint64_t offloads; /* Offloads for Tx Queue. */
 	struct mlx5_mr_ctrl mr_ctrl; /* MR control descriptor. */
@@ -162,6 +165,7 @@ struct __rte_cache_aligned mlx5_txq_data {
 #endif
 	volatile struct mlx5_cqe *cqes; /* Completion queue. */
 	volatile uint32_t *qp_db; /* Work queue doorbell. */
+	volatile uint32_t *slave_qp_db; /* Work queue doorbell. */
 	volatile uint32_t *cq_db; /* Completion queue doorbell. */
 	uint16_t port_id; /* Port ID of device. */
 	uint16_t idx; /* Queue index. */
@@ -858,8 +862,19 @@ mlx5_tx_cseg_init(struct mlx5_txq_data *__rte_restrict txq,
 	/* For legacy MPW replace the EMPW by TSO with modifier. */
 	if (MLX5_TXOFF_CONFIG(MPW) && opcode == MLX5_OPCODE_ENHANCED_MPSW)
 		opcode = MLX5_OPCODE_TSO | MLX5_OPC_MOD_MPW << 24;
-	cs->opcode = rte_cpu_to_be_32((txq->wqe_ci << 8) | opcode);
-	cs->sq_ds = rte_cpu_to_be_32(txq->qp_num_8s | ds);
+	uint32_t wqe_ci = txq->wqe_idx;
+	//if (!flip_flag)
+	//	wqe_ci -= 9;
+	cs->opcode = rte_cpu_to_be_32((wqe_ci << 8) | opcode);
+	uint32_t qp_num_8s;
+	qp_num_8s = txq->qp_num_8s;
+	/*
+	if (flip_flag)
+		qp_num_8s = txq->qp_num_8s;
+	else
+		qp_num_8s = txq->slave_qp_num_8s;
+	*/
+	cs->sq_ds = rte_cpu_to_be_32(qp_num_8s | ds);
 	if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
 		cs->flags = RTE_BE32(MLX5_COMP_ALWAYS <<
 				     MLX5_COMP_MODE_OFFSET);
@@ -2741,7 +2756,7 @@ mlx5_tx_burst_empw_simple(struct mlx5_txq_data *__rte_restrict txq,
 	MLX5_ASSERT(pkts_n > loc->pkts_sent);
 	pkts += loc->pkts_sent + 1;
 	pkts_n -= loc->pkts_sent;
-	uint32_t log_group_size = txq->sh->mu_group.log_group_size;
+	//uint32_t log_group_size = txq->sh->mu_group.log_group_size;
 	for (;;) {
 		struct mlx5_wqe_dseg *__rte_restrict dseg;
 		struct mlx5_wqe_eseg *__rte_restrict eseg;
@@ -2781,7 +2796,7 @@ next_empw:
 		if (likely(part > 1))
 			rte_prefetch0(*pkts);
 		//unsigned int multi_user_spacing = txq->wqe_ci * txq->sh->mu_group.group_size + txq->idx * 9;
-		loc->wqe_last = txq->wqes + (txq->wqe_ci & txq->wqe_m);
+		loc->wqe_last = txq->wqes + (txq->wqe_idx & txq->wqe_m);
 		/*
 		 * Build eMPW title WQEBB:
 		 * - Control Segment, eMPW opcode
@@ -2884,7 +2899,14 @@ next_empw:
 #endif
 		loc->elts_free -= part;
 		loc->pkts_sent += part;
-		txq->wqe_ci = txq->wqe_ci + (((2 + part + 3) / 4) << log_group_size);
+		txq->wqe_idx += (2 + part + 3) / 4;
+		txq->wqe_ci += (2 + part + 3) / 4;
+		/*
+		if (flip_flag)
+			txq->wqe_ci = txq->wqe_ci + (((2 + part + 3) / 4) << log_group_size);
+		else
+			txq->wqe_ci_slave = txq->wqe_ci_slave + (((2 + part + 3) / 4) << log_group_size);
+		*/
 		loc->wqe_free -= (2 + part + 3) / 4;
 		pkts_n -= part;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
@@ -3805,10 +3827,24 @@ enter_send_single:
 	 *   the next burst (after descriptor writing, at least).
 	 */
 	//uint32_t wqe_ci_by_core = txq->wqe_ci + 9*txq->idx;
+	volatile uint32_t wqe_ci;
+	volatile uint32_t * qp_db;
+	uint64_t db_cseg = *(volatile uint64_t *)loc.wqe_last;
+	wqe_ci = txq->wqe_ci;
+	if (flip_flag) {
+		qp_db = txq->qp_db;
+	}
+	else {
+		qp_db = txq->slave_qp_db;
+		//wqe_ci = txq->wqe_ci_slave;
+		db_cseg = db_cseg & 0xFF000000FFFFFFFF;
+		db_cseg = ((uint64_t)rte_cpu_to_be_32(txq->slave_qp_num_8s) << 32) | db_cseg;
+	}
 	mlx5_doorbell_ring(txq->sh->mu_group.uar,
-			   *(volatile uint64_t *)loc.wqe_last, txq->wqe_ci,
-			   txq->qp_db, !txq->db_nc &&
+			   db_cseg, wqe_ci,
+			   qp_db, !txq->db_nc &&
 			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
+	flip_flag = !flip_flag;
 	/* Not all of the mbufs may be stored into elts yet. */
 	part = MLX5_TXOFF_CONFIG(INLINE) ? 0 : loc.pkts_sent - loc.pkts_copy;
 	if (!MLX5_TXOFF_CONFIG(INLINE) && part) {

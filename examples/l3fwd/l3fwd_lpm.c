@@ -42,7 +42,7 @@ static struct rte_lpm *ipv4_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 static struct rte_lpm6 *ipv6_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 
 /* MODIFICATION STARTS */
-extern struct rte_mempool *pktmbuf_pool;
+extern struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
 /* MODIFICATION ENDS */
 
 /* Performing LPM-based lookups. 8< */
@@ -228,8 +228,11 @@ lpm_main_loop(__rte_unused void *dummy)
 			for (i = 0; i < 10; i++) {
 				for (int j = 0; j < 32; j++) {
 					pkt_bytes[98] = lcore_id;
-					pkt_bytes[99] = 32 * (2*i + lcore_id - 1) + j;
-					struct rte_mbuf *m = rte_pktmbuf_alloc(pktmbuf_pool);
+					pkt_bytes[99] = 32 * i + j;
+					int sid = rte_lcore_to_socket_id(lcore_id);
+					if (sid < 0 || sid >= NB_SOCKETS)
+						sid = 0;
+					struct rte_mbuf *m = rte_pktmbuf_alloc(pktmbuf_pool[portid][sid]);
 					if (m == NULL) {
 						printf("rte_pktmbuf_alloc Failed\n");
 						exit(-1);

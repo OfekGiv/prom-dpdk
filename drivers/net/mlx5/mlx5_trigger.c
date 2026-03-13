@@ -136,6 +136,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			goto error;
 		}
 		ret = priv->obj_ops.txq_obj_new(dev, 0);
+		printf("Created CQ with CQN: 0x%x\n", master_txq_ctrl->obj->cq_obj.cq->id);
 		if (ret < 0) {
 			mlx5_free(master_txq_ctrl->obj);
 			master_txq_ctrl->obj = NULL;
@@ -1266,7 +1267,7 @@ static int mlx5_dev_allocate_consec_tx_mem(struct rte_eth_dev *dev)
 	}
 	else {
 		// there are txqs_n SQ DBRs + 1 CQ DBR
-		total_size += MLX5_DBR_SIZE * (priv->txqs_n + 1);
+		total_size += MLX5_DBR_SIZE * (priv->txqs_n + 1 + 1);
 	}
 	umem_buf = mlx5_malloc_numa_tolerant(MLX5_MEM_RTE | MLX5_MEM_ZERO, total_size,
 					     alignment, priv->sh->numa_node);
@@ -1350,6 +1351,7 @@ mlx5_dev_start(struct rte_eth_dev *dev)
 	int ret;
 	int fine_inline;
 
+	dev->data->mu_sq_log_grp_size = priv->config.mu_sq_log_grp_size;
 	DRV_LOG(DEBUG, "port %u starting device", dev->data->port_id);
 #ifdef HAVE_MLX5_HWS_SUPPORT
 	if (priv->sh->config.dv_flow_en == 2) {
@@ -1437,7 +1439,6 @@ continue_dev_start:
 		goto lb_dummy_queue_release;
 	}
 
-	dev->data->mu_sq_log_grp_size = priv->config.mu_sq_log_grp_size;
 	ret = mlx5_txq_start(dev);
 	if (ret) {
 		DRV_LOG(ERR, "port %u Tx queue allocation failed: %s",
@@ -1470,7 +1471,7 @@ continue_dev_start:
 		SAVE_RTE_ERRNO_AND_STOP(ret, dev);
 		goto txq_stop;
 	}
-	/*
+/*
 	 * Such step will be skipped if there is no hairpin TX queue configured
 	 * with RX peer queue from the same device.
 	 */
