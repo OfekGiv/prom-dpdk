@@ -183,7 +183,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			txq_data->wqe_m = master_txq_data->wqe_m;
 			txq_data->wqes = master_txq_data->wqes;
 			txq_data->wqes_end = master_txq_data->wqes_end;
-			txq_data->wqe_ci = 0;
+			txq_data->wqe_ci = MLX5_MU_WQE_SIZE * idx;
 			txq_data->wqe_pi = 0;
 			txq_data->wqe_comp = 0;
 			txq_data->wqe_thres = master_txq_data->wqe_thres;

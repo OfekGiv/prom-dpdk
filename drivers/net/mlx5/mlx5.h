@@ -83,6 +83,9 @@
 /* Maximum allowed MTU to be reported whenever PMD cannot query it from OS. */
 #define MLX5_ETH_MAX_MTU (9978)
 
+/* Multi-user incerements CI with a constant value for burst_size = 32: (2 + burst_size + 3) / 4 = 9 */
+#define MLX5_MU_WQE_SIZE 9
+
 enum mlx5_ipool_index {
 #if defined(HAVE_IBV_FLOW_DV_SUPPORT) || !defined(HAVE_INFINIBAND_VERBS_H)
 	MLX5_IPOOL_DECAP_ENCAP = 0, /* Pool for encap/decap resource. */

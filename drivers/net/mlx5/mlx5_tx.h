@@ -2884,7 +2884,7 @@ next_empw:
 #endif
 		loc->elts_free -= part;
 		loc->pkts_sent += part;
-		txq->wqe_ci = txq->wqe_ci + (((2 + part + 3) / 4) << log_group_size);
+		txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
 		loc->wqe_free -= (2 + part + 3) / 4;
 		pkts_n -= part;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
