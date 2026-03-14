@@ -216,51 +216,78 @@ lpm_main_loop(__rte_unused void *dummy)
 		// 		rx_burst_size);
 		// 	if (nb_rx == 0)
 		// 		continue;
-		uint8_t pkt_bytes[] = {
-			0xd4,0xc3,0xb2,0xa1,0x02,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x01,0x00,0x00,0x00,0xe9,0x71,
-			0x7a,0x69,0x1d,0x24,0x0e,0x00,0x3c,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0xe8,0xeb,0xd3,0x98,0x25,0x8d,0x0c,0x42,0xa1,0x1d,0x3a,0xfa,
-			0x08,0x00,0x45,0x00,0x00,0x2e,0x2f,0xf2,0x00,0x00,0x40,0x06,0x00,0x00,0x03,0x03,0x03,0x03,0x04,0x03,0x03,0x02,0x04,0xd2,0x16,0x2e,
-			0x00,0x01,0x23,0x78,0x00,0x01,0x23,0x90,0x50,0x10,0x20,0x00,0x00,0x00,0x00,0x00,'N','u','m',':',0x00,0x00,
-		};
-		const uint16_t pkt_len = 100;
 
 		if (send_flag == 0) {
-			for (i = 0; i < 10; i++) {
-				for (int j = 0; j < 32; j++) {
-					pkt_bytes[98] = lcore_id;
-					pkt_bytes[99] = 32 * i + j;
-					int sid = rte_lcore_to_socket_id(lcore_id);
-					if (sid < 0 || sid >= NB_SOCKETS)
-						sid = 0;
-					struct rte_mbuf *m = rte_pktmbuf_alloc(pktmbuf_pool[portid][sid]);
-					if (m == NULL) {
-						printf("rte_pktmbuf_alloc Failed\n");
-						exit(-1);
-					}
+			int seq = 0;
+			int burst_count = 0;
+			portid = qconf->rx_queue_list[0].port_id;
 
-					uint8_t *dst = rte_pktmbuf_append(m, pkt_len);
-					if (dst == NULL) {
-						rte_pktmbuf_free(m);
-						printf("rte_pktmbuf_append Failed\n");
-						exit(-1);
-					}
-					portid = qconf->rx_queue_list[0].port_id;
-					rte_memcpy(dst, pkt_bytes, pkt_len);
+			while (1) {
+				char filename[256];
+				snprintf(filename, sizeof(filename),
+					"./pkts/pkt_lcore_%u_seq_%d.bin",
+					lcore_id, seq);
 
-					pkts_burst[j] = m;
+				FILE *fp = fopen(filename, "rb");
+				if (fp == NULL)
+					break; /* no more packet files */
 
-					/* MODIFICATION ENDS */
+				fseek(fp, 0, SEEK_END);
+				long file_size = ftell(fp);
+				fseek(fp, 0, SEEK_SET);
 
+				struct rte_mbuf *m = rte_pktmbuf_alloc(pktmbuf_pool);
+				if (m == NULL) {
+					fclose(fp);
+					printf("rte_pktmbuf_alloc Failed\n");
+					exit(-1);
 				}
 
-				nb_rx = 32;
+				uint8_t *dst = rte_pktmbuf_append(m, (uint16_t)file_size);
+				if (dst == NULL) {
+					rte_pktmbuf_free(m);
+					fclose(fp);
+					printf("rte_pktmbuf_append Failed\n");
+					exit(-1);
+				}
+
+				if (fread(dst, 1, file_size, fp) != (size_t)file_size) {
+					rte_pktmbuf_free(m);
+					fclose(fp);
+					printf("fread Failed for %s\n", filename);
+					exit(-1);
+				}
+				fclose(fp);
+
+				pkts_burst[burst_count++] = m;
+				seq++;
+
+				/* MODIFICATION ENDS */
+
+				if (burst_count == MAX_PKT_BURST) {
+					nb_rx = burst_count;
+#if defined RTE_ARCH_X86 || defined __ARM_NEON \
+					|| defined RTE_ARCH_PPC_64
+					l3fwd_lpm_send_packets(nb_rx, pkts_burst,
+						portid, qconf);
+#else
+					l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
+						portid, qconf);
+#endif /* X86 */
+					burst_count = 0;
+				}
+			}
+
+			/* flush remaining packets */
+			if (burst_count > 0) {
+				nb_rx = burst_count;
 #if defined RTE_ARCH_X86 || defined __ARM_NEON \
 				|| defined RTE_ARCH_PPC_64
 				l3fwd_lpm_send_packets(nb_rx, pkts_burst,
-			   portid, qconf);
+					portid, qconf);
 #else
 				l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
-				  portid, qconf);
+					portid, qconf);
 #endif /* X86 */
 			}
 
