@@ -862,10 +862,7 @@ mlx5_tx_cseg_init(struct mlx5_txq_data *__rte_restrict txq,
 	/* For legacy MPW replace the EMPW by TSO with modifier. */
 	if (MLX5_TXOFF_CONFIG(MPW) && opcode == MLX5_OPCODE_ENHANCED_MPSW)
 		opcode = MLX5_OPCODE_TSO | MLX5_OPC_MOD_MPW << 24;
-	uint32_t wqe_ci = txq->wqe_idx;
-	//if (!flip_flag)
-	//	wqe_ci -= 9;
-	cs->opcode = rte_cpu_to_be_32((wqe_ci << 8) | opcode);
+	cs->opcode = rte_cpu_to_be_32((txq->wqe_ci << 8) | opcode);
 	uint32_t qp_num_8s;
 	qp_num_8s = txq->qp_num_8s;
 	/*
@@ -3844,6 +3841,14 @@ enter_send_single:
 			   db_cseg, wqe_ci,
 			   qp_db, !txq->db_nc &&
 			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
+	mu_trace_db_ring(txq->idx,
+			 rte_lcore_id(),
+		  	 wqe_ci,
+		  	 txq->wqe_pi,
+		  	 (db_cseg & 0x00000000FF000000) >> 24,                  // Opcode
+		  	 rte_cpu_to_be_16((db_cseg & 0x0000000000FFFF00) >> 8), // WQE index
+		  	 (db_cseg & 0xFF00000000000000) >> 56,		        // DS
+		  	 rte_cpu_to_be_32((db_cseg & 0x00FFFFFF00000000) >> 32) >> 8);  // SQ Number
 	flip_flag = !flip_flag;
 	/* Not all of the mbufs may be stored into elts yet. */
 	part = MLX5_TXOFF_CONFIG(INLINE) ? 0 : loc.pkts_sent - loc.pkts_copy;

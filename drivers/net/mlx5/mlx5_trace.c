@@ -23,3 +23,6 @@ RTE_TRACE_POINT_REGISTER(rte_pmd_mlx5_trace_tx_push,
 
 RTE_TRACE_POINT_REGISTER(rte_pmd_mlx5_trace_tx_complete,
 	pmd.net.mlx5.tx.complete)
+
+RTE_TRACE_POINT_REGISTER(mu_trace_db_ring,
+	pmd.net.mlx5.db.ring)

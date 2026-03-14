@@ -69,6 +69,26 @@ RTE_TRACE_POINT_FP(
 	rte_trace_point_emit_u16(wqe_id);
 )
 
+RTE_TRACE_POINT_FP(
+	mu_trace_db_ring,
+	RTE_TRACE_POINT_ARGS(
+		uint16_t sq_idx,
+		uint32_t lcore_id,
+		uint32_t wqe_ci,
+		uint32_t wqe_pi,
+		uint8_t  opcode,
+		uint16_t wqe_index,
+		uint8_t  ds,
+		uint32_t sq_number),
+	rte_trace_point_emit_u16(sq_idx);
+	rte_trace_point_emit_u32(lcore_id);
+	rte_trace_point_emit_u32(wqe_ci);
+	rte_trace_point_emit_u32(wqe_pi);
+	rte_trace_point_emit_u8(opcode);
+	rte_trace_point_emit_u16(wqe_index);
+	rte_trace_point_emit_u8(ds);
+	rte_trace_point_emit_u32(sq_number);
+)
 #ifdef __cplusplus
 }
 #endif
