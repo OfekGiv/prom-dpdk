@@ -42,6 +42,7 @@ static struct rte_lpm *ipv4_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 static struct rte_lpm6 *ipv6_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 
 /* MODIFICATION STARTS */
+//extern struct rte_mempool *pktmbuf_pool;
 extern struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
 /* MODIFICATION ENDS */
 
@@ -236,7 +237,11 @@ lpm_main_loop(__rte_unused void *dummy)
 				long file_size = ftell(fp);
 				fseek(fp, 0, SEEK_SET);
 
-				struct rte_mbuf *m = rte_pktmbuf_alloc(pktmbuf_pool);
+				int sid = rte_lcore_to_socket_id(lcore_id);
+				if (sid < 0 || sid >= NB_SOCKETS)
+					sid = 0;
+
+				struct rte_mbuf *m = rte_pktmbuf_alloc(pktmbuf_pool[portid][sid]);
 				if (m == NULL) {
 					fclose(fp);
 					printf("rte_pktmbuf_alloc Failed\n");
@@ -264,7 +269,7 @@ lpm_main_loop(__rte_unused void *dummy)
 
 				/* MODIFICATION ENDS */
 
-				if (burst_count == MAX_PKT_BURST) {
+				if (burst_count == DEFAULT_PKT_BURST) {
 					nb_rx = burst_count;
 #if defined RTE_ARCH_X86 || defined __ARM_NEON \
 					|| defined RTE_ARCH_PPC_64
