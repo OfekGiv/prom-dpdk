@@ -136,6 +136,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			goto error;
 		}
 		ret = priv->obj_ops.txq_obj_new(dev, 0);
+		printf("Created CQ with CQN: 0x%x\n", master_txq_ctrl->obj->cq_obj.cq->id);
 		if (ret < 0) {
 			mlx5_free(master_txq_ctrl->obj);
 			master_txq_ctrl->obj = NULL;
