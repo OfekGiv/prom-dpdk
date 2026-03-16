@@ -225,7 +225,7 @@ lpm_main_loop(__rte_unused void *dummy)
 		const uint16_t pkt_len = 100;
 
 		if (send_flag == 0) {
-			for (i = 0; i < 10; i++) {
+			for (i = 0; i < 8; i++) {
 				for (int j = 0; j < 32; j++) {
 					pkt_bytes[98] = lcore_id;
 					pkt_bytes[99] = 32 * (2*i + lcore_id - 1) + j;
