@@ -3809,14 +3809,17 @@ enter_send_single:
 			   *(volatile uint64_t *)loc.wqe_last, txq->wqe_ci,
 			   txq->qp_db, !txq->db_nc &&
 			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
-	mu_trace_db_ring(txq->idx,
-			 rte_lcore_id(),
-		  	 wqe_ci,
-		  	 txq->wqe_pi,
-		  	 (db_cseg & 0x00000000FF000000) >> 24,                  // Opcode
-		  	 rte_cpu_to_be_16((db_cseg & 0x0000000000FFFF00) >> 8), // WQE index
-		  	 (db_cseg & 0xFF00000000000000) >> 56,		        // DS
-		  	 rte_cpu_to_be_32((db_cseg & 0x00FFFFFF00000000) >> 32) >> 8);  // SQ Number
+	if (unlikely(rte_trace_is_enabled())) {
+		uint64_t db_cseg = *(volatile uint64_t *)loc.wqe_last;
+		mu_trace_db_ring(txq->idx,
+		   rte_lcore_id(),
+		   txq->wqe_ci,
+		   txq->wqe_pi,
+		   (db_cseg & 0x00000000FF000000) >> 24,                  // Opcode
+		   rte_cpu_to_be_16((db_cseg & 0x0000000000FFFF00) >> 8), // WQE index
+		   (db_cseg & 0xFF00000000000000) >> 56,		        // DS
+		   rte_cpu_to_be_32((db_cseg & 0x00FFFFFF00000000) >> 32) >> 8);  // SQ Number
+	}
 	/* Not all of the mbufs may be stored into elts yet. */
 	part = MLX5_TXOFF_CONFIG(INLINE) ? 0 : loc.pkts_sent - loc.pkts_copy;
 	if (!MLX5_TXOFF_CONFIG(INLINE) && part) {

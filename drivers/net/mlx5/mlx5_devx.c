@@ -1540,7 +1540,7 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 				  log_desc_n, &sq_attr, priv->sh->numa_node);
 	printf("\n");
 	for (unsigned int i = 0; i < (1U << log_mu_grp_size); i++){
-		printf("txq %u is assigned with SQN %u\n", i, txq_obj->sq_obj.sq->id + i);
+		printf("txq %u is assigned with SQN 0x%x\n", i, txq_obj->sq_obj.sq->id + i);
 	}
 	if (!ret && priv->sh->config.txq_mem_algn)
 		priv->consec_tx_mem.sq_cur_off += txq_data->sq_mem_len;
