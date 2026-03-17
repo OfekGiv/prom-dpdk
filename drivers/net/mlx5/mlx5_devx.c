@@ -1502,6 +1502,7 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 			container_of(txq_data, struct mlx5_txq_ctrl, txq);
 	struct mlx5_txq_obj *txq_obj = txq_ctrl->obj;
 	uint8_t log_mu_grp_size = dev->data->mu_sq_log_grp_size;
+	struct mlx5_shared_mu_group *mu_group = &priv->sh->mu_group;
 	struct mlx5_devx_create_sq_attr sq_attr = {
 		.flush_in_error_en = 1,
 		.allow_multi_pkt_send_wqe = !!priv->config.mps,
@@ -1538,6 +1539,7 @@ mlx5_txq_create_devx_sq_resources(struct rte_eth_dev *dev, uint16_t idx,
 	}
 	ret = mlx5_devx_sq_create(cdev->ctx, &txq_obj->sq_obj,
 				  log_desc_n, &sq_attr, priv->sh->numa_node);
+	mu_group->master_sqn = txq_obj->sq_obj.sq->id;
 	printf("\n");
 	for (unsigned int i = 0; i < (1U << log_mu_grp_size); i++){
 		printf("txq %u is assigned with SQN 0x%x\n", i, txq_obj->sq_obj.sq->id + i);

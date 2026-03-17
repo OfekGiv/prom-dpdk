@@ -859,7 +859,8 @@ mlx5_tx_cseg_init(struct mlx5_txq_data *__rte_restrict txq,
 	if (MLX5_TXOFF_CONFIG(MPW) && opcode == MLX5_OPCODE_ENHANCED_MPSW)
 		opcode = MLX5_OPCODE_TSO | MLX5_OPC_MOD_MPW << 24;
 	cs->opcode = rte_cpu_to_be_32((txq->wqe_ci << 8) | opcode);
-	cs->sq_ds = rte_cpu_to_be_32(txq->qp_num_8s | ds);
+	uint32_t qp_num_8s = txq->sh->mu_group.master_sqn << 8;
+	cs->sq_ds = rte_cpu_to_be_32(qp_num_8s | ds);
 	if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
 		cs->flags = RTE_BE32(MLX5_COMP_ALWAYS <<
 				     MLX5_COMP_MODE_OFFSET);
@@ -3805,12 +3806,15 @@ enter_send_single:
 	 *   the next burst (after descriptor writing, at least).
 	 */
 	//uint32_t wqe_ci_by_core = txq->wqe_ci + 9*txq->idx;
+	uint64_t db_cseg = *(volatile uint64_t *)loc.wqe_last;
+	db_cseg = db_cseg & 0xFF000000FFFFFFFF;
+	db_cseg = ((uint64_t)rte_cpu_to_be_32(txq->qp_num_8s) << 32) | db_cseg;
+
 	mlx5_doorbell_ring(txq->sh->mu_group.uar,
-			   *(volatile uint64_t *)loc.wqe_last, txq->wqe_ci,
+			   db_cseg, txq->wqe_ci,
 			   txq->qp_db, !txq->db_nc &&
 			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
 	if (unlikely(rte_trace_is_enabled())) {
-		uint64_t db_cseg = *(volatile uint64_t *)loc.wqe_last;
 		mu_trace_db_ring(txq->idx,
 		   rte_lcore_id(),
 		   txq->wqe_ci,
