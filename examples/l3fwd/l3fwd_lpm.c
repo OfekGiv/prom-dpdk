@@ -219,19 +219,47 @@ lpm_main_loop(__rte_unused void *dummy)
 		// 		continue;
 
 		if (send_flag == 0) {
-			int seq = 0;
 			int burst_count = 0;
 			portid = qconf->rx_queue_list[0].port_id;
 
-			while (1) {
+			/* Compute this lcore's index among all active lcores.
+			 * Must use RTE_LCORE_FOREACH (not _WORKER) so the
+			 * main lcore is counted, matching gen_pkts core_idx.
+			 */
+			unsigned int lcore_index = 0;
+			unsigned int lid;
+			RTE_LCORE_FOREACH(lid) {
+				if (lid == lcore_id)
+					break;
+				if (lcore_conf[lid].n_rx_queue > 0)
+					lcore_index++;
+			}
+			int num_cores = 0;
+			RTE_LCORE_FOREACH(lid) {
+				if (lcore_conf[lid].n_rx_queue > 0)
+					num_cores++;
+			}
+			/* Read all 10 blocks of 32 packets, matching gen_pkts layout:
+			 * seq = (block * num_cores + lcore_index) * 32 + j
+			 */
+			for (int block = 0; block < 10; block++) {
+			int start_seq = (block * num_cores + lcore_index) * 32;
+			int seq = start_seq;
+
+			while (seq < start_seq + 32) {
 				char filename[256];
 				snprintf(filename, sizeof(filename),
 					"./pkts/pkt_lcore_%u_seq_%d.bin",
 					lcore_id, seq);
 
 				FILE *fp = fopen(filename, "rb");
-				if (fp == NULL)
+				if (fp == NULL) {
+					printf("lcore %u: failed to open %s\n",
+					       lcore_id, filename);
 					break; /* no more packet files */
+				}
+				printf("lcore %u: loaded %s\n",
+				       lcore_id, filename);
 
 				fseek(fp, 0, SEEK_END);
 				long file_size = ftell(fp);
@@ -282,6 +310,7 @@ lpm_main_loop(__rte_unused void *dummy)
 					burst_count = 0;
 				}
 			}
+			} /* end block loop */
 
 			/* flush remaining packets */
 			if (burst_count > 0) {
