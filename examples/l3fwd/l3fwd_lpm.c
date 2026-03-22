@@ -258,8 +258,6 @@ lpm_main_loop(__rte_unused void *dummy)
 					       lcore_id, filename);
 					break; /* no more packet files */
 				}
-				printf("lcore %u: loaded %s\n",
-				       lcore_id, filename);
 
 				fseek(fp, 0, SEEK_END);
 				long file_size = ftell(fp);
