@@ -242,7 +242,7 @@ lpm_main_loop(__rte_unused void *dummy)
 			/* Read all 10 blocks of 32 packets, matching gen_pkts layout:
 			 * seq = (block * num_cores + lcore_index) * 32 + j
 			 */
-			for (int block = 0; block < 10; block++) {
+			for (int block = 0; block < 20; block++) {
 			int start_seq = (block * num_cores + lcore_index) * 32;
 			int seq = start_seq;
 

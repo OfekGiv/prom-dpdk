@@ -2886,7 +2886,8 @@ next_empw:
 		loc->elts_free -= part;
 		loc->pkts_sent += part;
 		txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
-		loc->wqe_free -= (2 + part + 3) / 4;
+		loc->wqe_free -= MLX5_MU_WQE_SIZE << log_group_size;
+		//loc->wqe_free -= (2 + part + 3) / 4;
 		pkts_n -= part;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
 			return MLX5_TXCMP_CODE_EXIT;
