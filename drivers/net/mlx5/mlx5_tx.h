@@ -3828,6 +3828,11 @@ enter_send_single:
 	volatile uint32_t * qp_db;
 	uint64_t db_cseg = *(volatile uint64_t *)loc.wqe_last;
 	wqe_ci = txq->wqe_ci;
+	db_cseg = db_cseg & 0xFFFFFFFFFF0000FF;
+	db_cseg = ((uint64_t)rte_cpu_to_be_16(wqe_ci) << 8) | db_cseg;
+	//db_cseg = db_cseg & 0x00FFFFFFFFFFFFFF;
+	//uint8_t new_ds = 8;
+	//db_cseg = ((uint64_t)new_ds << 56) | db_cseg;
 	if (flip_flag) {
 		qp_db = txq->qp_db;
 	}
