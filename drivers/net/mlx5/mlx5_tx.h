@@ -152,6 +152,7 @@ struct __rte_cache_aligned mlx5_txq_data {
 	uint32_t qp_num_8s; /* QP number shifted by 8. */
 	uint32_t sq_mem_len; /* Length of TxQ for WQEs */
 	uint64_t offloads; /* Offloads for Tx Queue. */
+	uint64_t uar_doorbell; /* Offloads for Tx Queue. */
 	struct mlx5_mr_ctrl mr_ctrl; /* MR control descriptor. */
 	struct mlx5_wqe *wqes; /* Work queue. */
 	struct mlx5_wqe *wqes_end; /* Work queue array limit. */
@@ -858,7 +859,7 @@ mlx5_tx_cseg_init(struct mlx5_txq_data *__rte_restrict txq,
 	/* For legacy MPW replace the EMPW by TSO with modifier. */
 	if (MLX5_TXOFF_CONFIG(MPW) && opcode == MLX5_OPCODE_ENHANCED_MPSW)
 		opcode = MLX5_OPCODE_TSO | MLX5_OPC_MOD_MPW << 24;
-	cs->opcode = rte_cpu_to_be_32((txq->wqe_ci << 8) | opcode);
+	cs->opcode = rte_cpu_to_be_32(((uint32_t)txq->wqe_ci << 8) | opcode);
 	uint32_t qp_num_8s = txq->sh->mu_group.master_sqn << 8;
 	cs->sq_ds = rte_cpu_to_be_32(qp_num_8s | ds);
 	if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
@@ -2748,6 +2749,7 @@ mlx5_tx_burst_empw_simple(struct mlx5_txq_data *__rte_restrict txq,
 		struct mlx5_wqe_eseg *__rte_restrict eseg;
 		enum mlx5_txcmp_code ret;
 		unsigned int part, loop;
+		uint16_t next_ci;
 		unsigned int slen = 0;
 
 next_empw:
@@ -2885,9 +2887,25 @@ next_empw:
 #endif
 		loc->elts_free -= part;
 		loc->pkts_sent += part;
-		txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
+		next_ci = (MLX5_MU_WQE_SIZE << log_group_size) + txq->wqe_ci;
+		bool wrap_around_detected = ((next_ci ^ txq->wqe_ci) & txq->wqe_s) ? true : false;
+		if (wrap_around_detected) {
+			txq->wqe_ci = (next_ci & ~(txq->wqe_m)) + MLX5_MU_WQE_SIZE * txq->idx;
+		}
+		else {
+			txq->wqe_ci = next_ci;
+		}
+		//txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
 		loc->wqe_free -= MLX5_MU_WQE_SIZE << log_group_size;
-		//loc->wqe_free -= (2 + part + 3) / 4;
+		// Prepare doorbell ring
+		txq->uar_doorbell = *(uint64_t *)&loc->wqe_last->cseg;
+		// Set the current SQN to the doorbell ring
+		txq->uar_doorbell = txq->uar_doorbell & 0xFF000000FFFFFFFF;
+		txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_32(txq->qp_num_8s) << 32) | txq->uar_doorbell;
+		// Set the updated CI to the doorbell ring
+		txq->uar_doorbell = txq->uar_doorbell & 0x00FFFFFFFF0000FF;
+		txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_16(txq->wqe_ci) << 8) | txq->uar_doorbell;
+
 		pkts_n -= part;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
 			return MLX5_TXCMP_CODE_EXIT;
@@ -3779,6 +3797,7 @@ enter_send_single:
 		else
 			mlx5_tx_request_completion(txq, &loc, olx);
 	}
+
 	/*
 	 * Ring QP doorbell immediately after WQE building completion
 	 * to improve latencies. The pure software related data treatment
@@ -3807,12 +3826,12 @@ enter_send_single:
 	 *   the next burst (after descriptor writing, at least).
 	 */
 	//uint32_t wqe_ci_by_core = txq->wqe_ci + 9*txq->idx;
-	uint64_t db_cseg = *(volatile uint64_t *)loc.wqe_last;
-	db_cseg = db_cseg & 0xFF000000FFFFFFFF;
-	db_cseg = ((uint64_t)rte_cpu_to_be_32(txq->qp_num_8s) << 32) | db_cseg;
+	//uint64_t db_cseg = *(volatile uint64_t *)loc.wqe_last;
+	//db_cseg = db_cseg & 0xFF000000FFFFFFFF;
+	//db_cseg = ((uint64_t)rte_cpu_to_be_32(txq->qp_num_8s) << 32) | db_cseg;
 
 	mlx5_doorbell_ring(txq->sh->mu_group.uar,
-			   db_cseg, txq->wqe_ci,
+			   txq->uar_doorbell, txq->wqe_ci,
 			   txq->qp_db, !txq->db_nc &&
 			   (!txq->db_heu || pkts_n % MLX5_TX_DEFAULT_BURST));
 	if (unlikely(rte_trace_is_enabled())) {
@@ -3820,10 +3839,10 @@ enter_send_single:
 		   rte_lcore_id(),
 		   txq->wqe_ci,
 		   txq->wqe_pi,
-		   (db_cseg & 0x00000000FF000000) >> 24,                  // Opcode
-		   rte_cpu_to_be_16((db_cseg & 0x0000000000FFFF00) >> 8), // WQE index
-		   (db_cseg & 0xFF00000000000000) >> 56,		        // DS
-		   rte_cpu_to_be_32((db_cseg & 0x00FFFFFF00000000) >> 32) >> 8);  // SQ Number
+		   (txq->uar_doorbell & 0x00000000FF000000) >> 24,                  // Opcode
+		   rte_cpu_to_be_16((txq->uar_doorbell & 0x0000000000FFFF00) >> 8), // WQE index
+		   (txq->uar_doorbell & 0xFF00000000000000) >> 56,		        // DS
+		   rte_cpu_to_be_32((txq->uar_doorbell & 0x00FFFFFF00000000) >> 32) >> 8);  // SQ Number
 	}
 	/* Not all of the mbufs may be stored into elts yet. */
 	part = MLX5_TXOFF_CONFIG(INLINE) ? 0 : loc.pkts_sent - loc.pkts_copy;
