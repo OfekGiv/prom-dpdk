@@ -160,7 +160,7 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			  dev->data->port_id, 0, (void *)&master_txq_ctrl->obj);
 		LIST_INSERT_HEAD(&priv->txqsobj, master_txq_ctrl->obj, next);
 
-                for (unsigned int idx = 1; idx != priv->txqs_n; ++idx) {
+		for (unsigned int idx = 1; idx != priv->txqs_n; ++idx) {
 
 			struct mlx5_txq_ctrl *txq_ctrl = mlx5_txq_get(dev, idx);
 			struct mlx5_txq_data *txq_data = &txq_ctrl->txq;
@@ -193,7 +193,8 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			txq_data->db_nc = sh->tx_uar.dbnc;
 			txq_data->wait_on_time = !!(!sh->config.tx_pp &&
 				sh->cdev->config.hca_attr.wait_on_time);
-                }
+			txq_data->cq_ci = idx;
+		}
 	}
 	return 0;
 error:

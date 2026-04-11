@@ -243,7 +243,7 @@ mlx5_tx_handle_completion(struct mlx5_txq_data *__rte_restrict txq,
 						       wqe_id, ts);
 		}
 		ring_doorbell = true;
-		++txq->cq_ci;
+		txq->cq_ci += (1 << txq->sh->mu_group.log_group_size);
 		last_cqe = cqe;
 		/*
 		 * We have to restrict the amount of processed CQEs

@@ -3604,10 +3604,8 @@ send_loop:
 	 * - doorbell the NIC about processed CQEs
 	 */
 	rte_prefetch0(*(pkts + loc.pkts_sent));
-	// In multi-user mode, only master processes CQEs
-	// TODO: Check if multi-user is enabled
-	if (txq->idx == 0)
-		mlx5_tx_handle_completion(txq, olx);
+
+	mlx5_tx_handle_completion(txq, olx);
 	/*
 	 * Calculate the number of available resources - elts and WQEs.
 	 * There are two possible different scenarios:
