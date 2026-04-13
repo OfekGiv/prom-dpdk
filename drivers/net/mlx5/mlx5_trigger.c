@@ -194,6 +194,12 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			txq_data->wait_on_time = !!(!sh->config.tx_pp &&
 				sh->cdev->config.hca_attr.wait_on_time);
 			txq_data->cq_ci = idx;
+			txq_data->cqes = master_txq_data->cqes;
+			txq_data->cqe_s = master_txq_data->cqe_s;
+			txq_data->cqe_n = master_txq_data->cqe_n;
+			txq_data->cqe_m = master_txq_data->cqe_m;
+			txq_data->fcqs = master_txq_data->fcqs;
+			txq_data->cq_db= master_txq_data->cq_db;
 		}
 	}
 	return 0;

@@ -157,7 +157,7 @@ mlx5_tx_comp_flush(struct mlx5_txq_data *__rte_restrict txq,
 		uint16_t tail;
 
 		txq->wqe_pi = rte_be_to_cpu_16(last_cqe->wqe_counter);
-		tail = txq->fcqs[(txq->cq_ci - 1) & txq->cqe_m];
+		tail = txq->fcqs[(txq->cq_ci - (1 << txq->sh->mu_group.log_group_size)) & txq->cqe_m];
 		if (likely(tail != txq->elts_tail)) {
 			mlx5_tx_free_elts(txq, tail, olx);
 			MLX5_ASSERT(tail == txq->elts_tail);
@@ -222,7 +222,7 @@ mlx5_tx_handle_completion(struct mlx5_txq_data *__rte_restrict txq,
 			 * The send queue is supposed to be empty.
 			 */
 			ring_doorbell = true;
-			++txq->cq_ci;
+			txq->cq_ci += (1 << txq->sh->mu_group.log_group_size);
 			txq->cq_pi = txq->cq_ci;
 			last_cqe = NULL;
 			continue;

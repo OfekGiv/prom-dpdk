@@ -1406,7 +1406,8 @@ mlx5_txq_release(struct rte_eth_dev *dev, uint16_t idx)
 	}
 	if (!txq_ctrl->is_hairpin) {
 		if (txq_ctrl->txq.fcqs) {
-			mlx5_free(txq_ctrl->txq.fcqs);
+			if (idx == 0)
+				mlx5_free(txq_ctrl->txq.fcqs);
 			txq_ctrl->txq.fcqs = NULL;
 		}
 		txq_free_elts(txq_ctrl);

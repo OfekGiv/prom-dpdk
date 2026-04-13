@@ -1602,6 +1602,7 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 			1 + MLX5_TX_COMP_THRESH_INLINE_DIV;
 	log_desc_n = log2above(cqe_n);
 	cqe_n = 1UL << log_desc_n;
+	MLX5_ASSERT(cqe_n <= sh->mu_group.group_size);
 	if (cqe_n > UINT16_MAX) {
 		DRV_LOG(ERR, "Port %u Tx queue %u requests to many CQEs %u.",
 			dev->data->port_id, txq_data->idx, cqe_n);

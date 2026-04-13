@@ -770,7 +770,8 @@ mlx5_tx_request_completion(struct mlx5_txq_data *__rte_restrict txq,
 		txq->fcqs[txq->cq_pi++ & txq->cqe_m] = head |
 			  (last->cseg.opcode >> 8) << 16;
 #else
-		txq->fcqs[txq->cq_pi++ & txq->cqe_m] = head;
+		txq->fcqs[txq->cq_pi & txq->cqe_m] = head;
+		txq->cq_pi += 1 << txq->sh->mu_group.log_group_size;
 #endif
 		/* A CQE slot must always be available. */
 		MLX5_ASSERT((txq->cq_pi - txq->cq_ci) <= txq->cqe_s);
@@ -3618,8 +3619,13 @@ send_loop:
 	loc.elts_free = txq->elts_s -
 				(uint16_t)(txq->elts_head - txq->elts_tail);
 	MLX5_ASSERT(txq->wqe_s >= (uint16_t)(txq->wqe_ci - txq->wqe_pi));
-	loc.wqe_free = txq->wqe_s -
-				(uint16_t)(txq->wqe_ci - txq->wqe_pi);
+
+	uint16_t slots = txq->wqe_s >> txq->sh->mu_group.log_group_size;
+	loc.wqe_free = slots -
+				((uint16_t)(txq->wqe_ci + slots - txq->wqe_pi) % slots);
+
+	//loc.wqe_free = txq->wqe_s -
+	//			(uint16_t)(txq->wqe_ci - txq->wqe_pi);
 	if (unlikely(!loc.elts_free || !loc.wqe_free))
 		goto burst_exit;
 	for (;;) {
@@ -3788,13 +3794,11 @@ enter_send_single:
 	/* Take a shortcut if nothing is sent. */
 	if (unlikely(loc.pkts_sent == loc.pkts_loop))
 		goto burst_exit;
-	if (txq->idx == 0) {
-		/* Request CQE generation if limits are reached. */
-		if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
-			mlx5_tx_request_completion_trace(txq, &loc, olx);
-		else
-			mlx5_tx_request_completion(txq, &loc, olx);
-	}
+	/* Request CQE generation if limits are reached. */
+	if (MLX5_TXOFF_CONFIG(TXPP) && __rte_trace_point_fp_is_enabled())
+		mlx5_tx_request_completion_trace(txq, &loc, olx);
+	else
+		mlx5_tx_request_completion(txq, &loc, olx);
 
 	/*
 	 * Ring QP doorbell immediately after WQE building completion
