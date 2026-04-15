@@ -3556,6 +3556,27 @@ ordinary_send:
 	}
 }
 
+static __rte_always_inline void
+mlx5_tx_wait_wqe_free(struct mlx5_txq_data *__rte_restrict txq,
+                      struct mlx5_txq_local *__rte_restrict loc,
+                      unsigned int olx,
+                      uint16_t need)
+{
+    for (;;) {
+        /* producer step: harvest CQEs and advance wqe_pi */
+        mlx5_tx_handle_completion(txq, olx);
+
+        /* recompute available WQE slots exactly like mlx5_tx_burst_tmpl() */
+        uint16_t slots = txq->wqe_s >> txq->sh->mu_group.log_group_size;
+        loc->wqe_free = slots -
+            ((uint16_t)(txq->wqe_ci + slots - txq->wqe_pi) % slots);
+
+        if (likely(loc->wqe_free >= need))
+            return;
+        /* busy spin: no pause/yield yet */
+    }
+}
+
 /**
  * DPDK Tx callback template. This is configured template used to generate
  * routines optimized for specified offload setup.
@@ -3626,8 +3647,13 @@ send_loop:
 
 	//loc.wqe_free = txq->wqe_s -
 	//			(uint16_t)(txq->wqe_ci - txq->wqe_pi);
-	if (unlikely(!loc.elts_free || !loc.wqe_free))
+	if (unlikely(!loc.elts_free))
 		goto burst_exit;
+
+	if (unlikely(loc.wqe_free < 34)) {
+		mlx5_tx_wait_wqe_free(txq, &loc, olx, 1);
+	}
+
 	for (;;) {
 		/*
 		 * Fetch the packet from array. Usually this is the first
@@ -3883,6 +3909,7 @@ burst_exit:
 					   loc.pkts_sent, pkts_n);
 	return loc.pkts_sent;
 }
+
 
 /**
  * Check whether given TxQ is external.
