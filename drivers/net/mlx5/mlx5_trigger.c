@@ -186,6 +186,8 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			txq_data->wqes_end = master_txq_data->wqes_end;
 			txq_data->wqe_ci = MLX5_MU_WQE_SIZE * idx;
 			txq_data->wqe_pi = 0;
+			txq_data->wqe_group_thres = master_txq_data->wqe_group_thres;
+			txq_data->wqe_wrap_offset_add = master_txq_data->wqe_wrap_offset_add;
 			txq_data->wqe_comp = 0;
 			txq_data->wqe_thres = master_txq_data->wqe_thres;
 			txq_data->qp_num_8s = (master_txq_obj->sq_obj.sq->id + idx) << 8;

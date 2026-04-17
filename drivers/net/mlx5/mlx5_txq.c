@@ -1161,7 +1161,6 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 			goto error;
 	}
 	MLX5_ASSERT(desc > MLX5_TX_COMP_THRESH);
-	uint16_t mu_desc = desc >> log_mu_grp_size;
 	// Single user SQ
 	if (mu_grp_size == 0) {
 		tmpl->txq.offloads = conf->offloads |

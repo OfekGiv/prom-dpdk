@@ -1580,6 +1580,7 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	struct mlx5_proc_priv *ppriv = MLX5_PROC_PRIV(PORT_ID(priv));
 	struct mlx5_dev_ctx_shared *sh = priv->sh;
 	struct mlx5_txq_obj *txq_obj = txq_ctrl->obj;
+	struct mlx5_shared_mu_group *mu_group = &sh->mu_group;
 	struct mlx5_devx_cq_attr cq_attr = {
 		.uar_page_id = mlx5_os_get_devx_uar_page_id(sh->tx_uar.obj),
 	};
@@ -1587,6 +1588,7 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	uint32_t wqe_n, wqe_size;
 	int ret = 0;
 	uint32_t db_start = priv->consec_tx_mem.sq_total_size + priv->consec_tx_mem.cq_total_size;
+	uint32_t wqe_stride = MLX5_MU_WQE_SIZE << mu_group->log_group_size;
 
 	MLX5_ASSERT(txq_data);
 	MLX5_ASSERT(txq_obj);
@@ -1672,6 +1674,9 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	txq_data->wqes_end = txq_data->wqes + txq_data->wqe_s;
 	txq_data->wqe_ci = 0;
 	txq_data->wqe_pi = 0;
+	uint32_t q_residue_offset = (txq_data->wqe_s / wqe_stride) * wqe_stride;
+	txq_data->wqe_group_thres = q_residue_offset - wqe_stride;
+	txq_data->wqe_wrap_offset_add = txq_data->wqe_s - q_residue_offset + wqe_stride;
 	txq_data->wqe_comp = 0;
 	txq_data->wqe_thres = txq_data->wqe_s / MLX5_TX_COMP_THRESH_INLINE_DIV;
 	txq_data->qp_db = &txq_obj->sq_obj.db_rec[MLX5_SND_DBR];

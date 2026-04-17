@@ -124,6 +124,8 @@ struct __rte_cache_aligned mlx5_txq_data {
 	uint16_t wqe_pi; /* Producer index for work queue. */
 	uint16_t wqe_s; /* Number of WQ elements. */
 	uint16_t wqe_m; /* Mask Number for WQ elements. */
+	uint16_t wqe_group_thres; /* Offset theshold for wrap-around. */
+	uint16_t wqe_wrap_offset_add; /* Offset addition for wrap-around. */
 	uint16_t wqe_comp; /* WQE index since last completion request. */
 	uint16_t wqe_thres; /* WQE threshold to request completion in CQ. */
 	/* WQ related fields. */
@@ -2750,7 +2752,6 @@ mlx5_tx_burst_empw_simple(struct mlx5_txq_data *__rte_restrict txq,
 		struct mlx5_wqe_eseg *__rte_restrict eseg;
 		enum mlx5_txcmp_code ret;
 		unsigned int part, loop;
-		uint16_t next_ci;
 		unsigned int slen = 0;
 
 next_empw:
@@ -2888,14 +2889,10 @@ next_empw:
 #endif
 		loc->elts_free -= part;
 		loc->pkts_sent += part;
-		next_ci = (MLX5_MU_WQE_SIZE << log_group_size) + txq->wqe_ci;
-		bool wrap_around_detected = ((next_ci ^ txq->wqe_ci) & txq->wqe_s) ? true : false;
-		if (wrap_around_detected) {
-			txq->wqe_ci = (next_ci & ~(txq->wqe_m)) + MLX5_MU_WQE_SIZE * txq->idx;
-		}
-		else {
-			txq->wqe_ci = next_ci;
-		}
+		if ((txq->wqe_ci & txq->wqe_m) >= txq->wqe_group_thres)
+			txq->wqe_ci += txq->wqe_wrap_offset_add;
+		else
+			txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
 		//txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
 		loc->wqe_free -= MLX5_MU_WQE_SIZE << log_group_size;
 		// Prepare doorbell ring
