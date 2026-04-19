@@ -2902,7 +2902,7 @@ next_empw:
 		txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_32(txq->qp_num_8s) << 32) | txq->uar_doorbell;
 		// Set the updated CI to the doorbell ring
 		txq->uar_doorbell = txq->uar_doorbell & 0x00FFFFFFFF0000FF;
-		txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_16(txq->wqe_ci) << 8) | txq->uar_doorbell;
+		txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_16(txq->wqe_ci - 1) << 8) | txq->uar_doorbell | ((uint64_t)1 << 56);
 
 		pkts_n -= part;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
