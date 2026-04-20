@@ -2889,11 +2889,7 @@ next_empw:
 #endif
 		loc->elts_free -= part;
 		loc->pkts_sent += part;
-		if ((txq->wqe_ci & txq->wqe_m) >= txq->wqe_group_thres)
-			txq->wqe_ci += txq->wqe_wrap_offset_add;
-		else
-			txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
-		//txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
+		txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
 		loc->wqe_free -= MLX5_MU_WQE_SIZE << log_group_size;
 		// Prepare doorbell ring
 		txq->uar_doorbell = *(uint64_t *)&loc->wqe_last->cseg;
@@ -2902,7 +2898,8 @@ next_empw:
 		txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_32(txq->qp_num_8s) << 32) | txq->uar_doorbell;
 		// Set the updated CI to the doorbell ring
 		txq->uar_doorbell = txq->uar_doorbell & 0x00FFFFFFFF0000FF;
-		txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_16(txq->wqe_ci - 1) << 8) | txq->uar_doorbell | ((uint64_t)1 << 56);
+		uint8_t ds = (uint8_t)(MLX5_MU_WQE_SIZE << 2);
+		txq->uar_doorbell = ((uint64_t)ds << 56) | ((uint64_t)rte_cpu_to_be_16(txq->wqe_ci - MLX5_MU_WQE_SIZE) << 8) | txq->uar_doorbell;
 
 		pkts_n -= part;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))
@@ -3638,16 +3635,16 @@ send_loop:
 				(uint16_t)(txq->elts_head - txq->elts_tail);
 	MLX5_ASSERT(txq->wqe_s >= (uint16_t)(txq->wqe_ci - txq->wqe_pi));
 
-	uint16_t slots = txq->wqe_s >> txq->sh->mu_group.log_group_size;
-	loc.wqe_free = slots -
-				((uint16_t)(txq->wqe_ci + slots - txq->wqe_pi) % slots);
+	//uint16_t slots = txq->wqe_s >> txq->sh->mu_group.log_group_size;
+	loc.wqe_free = txq->wqe_s -
+				((uint16_t)(txq->wqe_ci + txq->wqe_s - txq->wqe_pi) % txq->wqe_s);
 
 	//loc.wqe_free = txq->wqe_s -
 	//			(uint16_t)(txq->wqe_ci - txq->wqe_pi);
 	if (unlikely(!loc.elts_free))
 		goto burst_exit;
 
-	if (unlikely(loc.wqe_free < 34)) {
+	if (unlikely(loc.wqe_free < 30)) {
 		mlx5_tx_wait_wqe_free(txq, &loc, olx, 1);
 	}
 

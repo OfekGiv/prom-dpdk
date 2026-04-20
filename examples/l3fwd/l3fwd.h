@@ -23,7 +23,7 @@
 #define RX_DESC_DEFAULT 1024
 #define TX_DESC_DEFAULT 1024
 
-#define DEFAULT_PKT_BURST 32
+#define DEFAULT_PKT_BURST 30
 #define MAX_PKT_BURST 512
 #define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
 

@@ -83,8 +83,13 @@
 /* Maximum allowed MTU to be reported whenever PMD cannot query it from OS. */
 #define MLX5_ETH_MAX_MTU (9978)
 
-/* Multi-user incerements CI with a constant value for burst_size = 32: (2 + burst_size + 3) / 4 = 9 */
-#define MLX5_MU_WQE_SIZE 9
+/*
+ * Multi-user per-burst slot size in WQEBBs. Every eMPW burst is padded
+ * (with an MLX5_OPCODE_NOP trailer) up to exactly this many WQEBBs so
+ * that slaves sharing the SQ remain slot-aligned.
+ * Natural min for burst_size=32 is ceil((2 + 32) / 4) = 8.
+ */
+#define MLX5_MU_WQE_SIZE 8
 
 enum mlx5_ipool_index {
 #if defined(HAVE_IBV_FLOW_DV_SUPPORT) || !defined(HAVE_INFINIBAND_VERBS_H)
@@ -2803,3 +2808,4 @@ mlx5_hw_ctx_validate(const struct rte_eth_dev *dev,
 		     struct rte_flow_error *error);
 
 #endif /* RTE_PMD_MLX5_H_ */
+

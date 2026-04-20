@@ -46,8 +46,10 @@ tx_recover_qp(struct mlx5_txq_ctrl *txq_ctrl)
 			.queue_id = txq_ctrl->txq.idx,
 	};
 
-	if (mlx5_queue_state_modify(ETH_DEV(txq_ctrl->priv), &sm))
-		return -1;
+	if (txq_ctrl->txq.idx == 0) {
+		if (mlx5_queue_state_modify(ETH_DEV(txq_ctrl->priv), &sm))
+			return -1;
+	}
 	txq_ctrl->txq.wqe_ci = 0;
 	txq_ctrl->txq.wqe_pi = 0;
 	txq_ctrl->txq.elts_comp = 0;
