@@ -196,11 +196,32 @@ mlx5_txq_start(struct rte_eth_dev *dev)
 			txq_data->wait_on_time = !!(!sh->config.tx_pp &&
 				sh->cdev->config.hca_attr.wait_on_time);
 			txq_data->cq_ci = idx;
+			txq_data->cq_pi = idx;
 			txq_data->cqes = master_txq_data->cqes;
 			txq_data->cqe_s = master_txq_data->cqe_s;
 			txq_data->cqe_n = master_txq_data->cqe_n;
 			txq_data->cqe_m = master_txq_data->cqe_m;
-			txq_data->fcqs = master_txq_data->fcqs;
+			/* Per-slave fcqs: each slave tracks its own completion
+			 * heads so parallel requests from different slaves can't
+			 * overwrite each other. Sized same as the shared CQ, used
+			 * by the slave alone — capacity in # of outstanding
+			 * requests is cqe_s (since cq_pi advances by group_size
+			 * per request and we shift out those bits when indexing).
+			 */
+			{
+				size_t size = txq_data->cqe_s *
+					      sizeof(*txq_data->fcqs);
+				txq_data->fcqs = mlx5_malloc_numa_tolerant(
+					flags, size, RTE_CACHE_LINE_SIZE,
+					txq_ctrl->socket);
+				if (!txq_data->fcqs) {
+					DRV_LOG(ERR, "Port %u slave TxQ %u "
+						"cannot allocate memory (FCQ).",
+						dev->data->port_id, idx);
+					rte_errno = ENOMEM;
+					goto error;
+				}
+			}
 			txq_data->cq_db= master_txq_data->cq_db;
 		}
 	}
@@ -2319,3 +2340,4 @@ mlx5_traffic_vlan_remove(struct rte_eth_dev *dev, const uint16_t vid)
 
 	return 0;
 }
+

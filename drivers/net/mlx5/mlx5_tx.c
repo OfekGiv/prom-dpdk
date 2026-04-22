@@ -157,9 +157,16 @@ mlx5_tx_comp_flush(struct mlx5_txq_data *__rte_restrict txq,
 {
 	if (likely(last_cqe != NULL)) {
 		uint16_t tail;
+		uint16_t gsh = txq->sh->mu_group.log_group_size;
+		uint16_t req_idx;
 
 		txq->wqe_pi = rte_be_to_cpu_16(last_cqe->wqe_counter);
-		tail = txq->fcqs[(txq->cq_ci - (1 << txq->sh->mu_group.log_group_size)) & txq->cqe_m];
+		/* Match request_completion's indexing: request count space
+		 * (cq_ci >> log_group_size) - 1 gives the slot of the head
+		 * for the CQE we just advanced past.
+		 */
+		req_idx = ((txq->cq_ci >> gsh) - 1U) & txq->cqe_m;
+		tail = txq->fcqs[req_idx];
 		if (likely(tail != txq->elts_tail)) {
 			mlx5_tx_free_elts(txq, tail, olx);
 			MLX5_ASSERT(tail == txq->elts_tail);
@@ -850,3 +857,4 @@ int rte_pmd_mlx5_txq_dump_contexts(uint16_t port_id, uint16_t queue_id, const ch
 	fclose(fd);
 	return ret;
 }
+

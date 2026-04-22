@@ -767,16 +767,22 @@ mlx5_tx_request_completion(struct mlx5_txq_data *__rte_restrict txq,
 		/* Request unconditional completion on last WQE. */
 		last->cseg.flags = RTE_BE32(MLX5_COMP_ALWAYS <<
 					    MLX5_COMP_MODE_OFFSET);
-		/* Save elts_head in dedicated free on completion queue. */
+		/* Save elts_head in dedicated free on completion queue.
+		 * fcqs is per-slave; index by request count
+		 * (cq_pi >> log_group_size) so each slave's requests occupy
+		 * distinct slots regardless of its slot offset (idx).
+		 */
+		{
+			uint16_t gsh = txq->sh->mu_group.log_group_size;
+			uint16_t req_idx = (txq->cq_pi >> gsh) & txq->cqe_m;
 #ifdef RTE_LIBRTE_MLX5_DEBUG
-		txq->fcqs[txq->cq_pi++ & txq->cqe_m] = head |
-			  (last->cseg.opcode >> 8) << 16;
+			txq->fcqs[req_idx] = head |
+				  (last->cseg.opcode >> 8) << 16;
 #else
-		txq->fcqs[txq->cq_pi & txq->cqe_m] = head;
-		txq->cq_pi += 1 << txq->sh->mu_group.log_group_size;
+			txq->fcqs[req_idx] = head;
 #endif
-		/* A CQE slot must always be available. */
-		MLX5_ASSERT((txq->cq_pi - txq->cq_ci) <= txq->cqe_s);
+			txq->cq_pi += 1U << gsh;
+		}
 	}
 }
 
@@ -3929,3 +3935,4 @@ mlx5_is_external_txq(struct rte_eth_dev *dev, uint16_t queue_idx)
 }
 
 #endif /* RTE_PMD_MLX5_TX_H_ */
+

@@ -1800,6 +1800,49 @@ main(int argc, char **argv)
 		rte_eal_mp_wait_lcore();
 
 		RTE_ETH_FOREACH_DEV(portid) {
+			struct rte_eth_stats s;
+			if ((enabled_port_mask & (1 << portid)) == 0)
+				continue;
+			if (rte_eth_stats_get(portid, &s) == 0)
+				printf("Port %u opackets=%" PRIu64
+				       " oerrors=%" PRIu64 "\n",
+				       portid, s.opackets, s.oerrors);
+			/* Dump HW xstats of interest (tx_packets_phy tells us
+			 * what actually hit the wire).
+			 */
+			{
+				int n = rte_eth_xstats_get_names(portid, NULL, 0);
+				if (n > 0) {
+					struct rte_eth_xstat_name *names =
+						calloc(n, sizeof(*names));
+					struct rte_eth_xstat *xs =
+						calloc(n, sizeof(*xs));
+					if (names && xs) {
+						rte_eth_xstats_get_names(portid, names, n);
+						rte_eth_xstats_get(portid, xs, n);
+						for (int i = 0; i < n; i++) {
+							const char *nm = names[i].name;
+							/* Dump any tx-related non-zero xstat
+							 * plus anything phy/discard so we can
+							 * see the real name.
+							 */
+							if (xs[i].value == 0)
+								continue;
+							if (strstr(nm, "tx_") ||
+							    strstr(nm, "phy") ||
+							    strstr(nm, "discard") ||
+							    strstr(nm, "drop"))
+								printf("  %s = %" PRIu64 "\n",
+								       nm, xs[i].value);
+						}
+					}
+					free(names);
+					free(xs);
+				}
+			}
+		}
+
+		RTE_ETH_FOREACH_DEV(portid) {
 			if ((enabled_port_mask & (1 << portid)) == 0)
 				continue;
 			printf("Closing port %d...", portid);
@@ -1822,3 +1865,4 @@ main(int argc, char **argv)
 
 	return ret;
 }
+

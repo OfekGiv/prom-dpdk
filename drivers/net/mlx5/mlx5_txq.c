@@ -1405,8 +1405,10 @@ mlx5_txq_release(struct rte_eth_dev *dev, uint16_t idx)
 	}
 	if (!txq_ctrl->is_hairpin) {
 		if (txq_ctrl->txq.fcqs) {
-			if (idx == 0)
-				mlx5_free(txq_ctrl->txq.fcqs);
+			/* Every TxQ (master and each slave) now owns its own
+			 * fcqs allocation — free it regardless of idx.
+			 */
+			mlx5_free(txq_ctrl->txq.fcqs);
 			txq_ctrl->txq.fcqs = NULL;
 		}
 		txq_free_elts(txq_ctrl);
@@ -1761,3 +1763,4 @@ rte_pmd_mlx5_external_tx_queue_id_unmap(uint16_t port_id, uint16_t dpdk_idx)
 		port_id, dpdk_idx);
 	return 0;
 }
+
