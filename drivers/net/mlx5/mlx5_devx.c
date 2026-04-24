@@ -1674,9 +1674,7 @@ mlx5_txq_devx_obj_new(struct rte_eth_dev *dev, uint16_t idx)
 	txq_data->wqes_end = txq_data->wqes + txq_data->wqe_s;
 	txq_data->wqe_ci = 0;
 	txq_data->wqe_pi = 0;
-	uint32_t q_residue_offset = (txq_data->wqe_s / wqe_stride) * wqe_stride;
-	txq_data->wqe_group_thres = q_residue_offset - wqe_stride;
-	txq_data->wqe_wrap_offset_add = txq_data->wqe_s - q_residue_offset + wqe_stride;
+	txq_data->wqe_group_thres = MLX5_MU_WQE_SIZE * sh->mu_group.group_size;
 	txq_data->wqe_comp = 0;
 	txq_data->wqe_thres = txq_data->wqe_s / MLX5_TX_COMP_THRESH_INLINE_DIV;
 	txq_data->qp_db = &txq_obj->sq_obj.db_rec[MLX5_SND_DBR];

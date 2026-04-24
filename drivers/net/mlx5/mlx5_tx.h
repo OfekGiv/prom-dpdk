@@ -125,7 +125,6 @@ struct __rte_cache_aligned mlx5_txq_data {
 	uint16_t wqe_s; /* Number of WQ elements. */
 	uint16_t wqe_m; /* Mask Number for WQ elements. */
 	uint16_t wqe_group_thres; /* Offset theshold for wrap-around. */
-	uint16_t wqe_wrap_offset_add; /* Offset addition for wrap-around. */
 	uint16_t wqe_comp; /* WQE index since last completion request. */
 	uint16_t wqe_thres; /* WQE threshold to request completion in CQ. */
 	/* WQ related fields. */
@@ -3642,15 +3641,16 @@ send_loop:
 	MLX5_ASSERT(txq->wqe_s >= (uint16_t)(txq->wqe_ci - txq->wqe_pi));
 
 	//uint16_t slots = txq->wqe_s >> txq->sh->mu_group.log_group_size;
-	loc.wqe_free = txq->wqe_s -
-				((uint16_t)(txq->wqe_ci + txq->wqe_s - txq->wqe_pi) % txq->wqe_s);
+	uint16_t used = (uint16_t)(txq->wqe_ci - txq->wqe_pi);
+	loc.wqe_free = likely(used <= txq->wqe_s) ?
+			(uint16_t)(txq->wqe_s - used) : 0;
 
 	//loc.wqe_free = txq->wqe_s -
 	//			(uint16_t)(txq->wqe_ci - txq->wqe_pi);
 	if (unlikely(!loc.elts_free))
 		goto burst_exit;
 
-	if (unlikely(loc.wqe_free < 30)) {
+	if (unlikely(loc.wqe_free == 0)) {
 		mlx5_tx_wait_wqe_free(txq, &loc, olx, 1);
 	}
 
