@@ -100,3 +100,15 @@ subdir(exec_env)
 subdir('hws')
 
 annotate_locks = false
+
+includes += include_directories('/opt/mellanox/doca/include')
+stdcpp_dep = cc.find_library('stdc++', required: true)
+if not cc.links(min_c_code, dependencies: stdcpp_dep)
+    error('broken dependency, "libstdc++"')
+endif
+ext_deps += [
+    cc.find_library('doca_flow', dirs: '/opt/mellanox/doca/lib/x86_64-linux-gnu'),
+    cc.find_library('doca_common', dirs: '/opt/mellanox/doca/lib/x86_64-linux-gnu'),
+    cc.find_library('doca_dpdk_bridge', dirs: '/opt/mellanox/doca/lib/x86_64-linux-gnu', static: true),
+    stdcpp_dep,
+]

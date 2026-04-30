@@ -42,6 +42,7 @@
 #include <rte_string_fns.h>
 #include <rte_cpuflags.h>
 
+
 #include <cmdline_parse.h>
 #include <cmdline_parse_etheraddr.h>
 
@@ -251,6 +252,7 @@ const struct ipv6_l3fwd_route ipv6_l3fwd_route_array[] = {
 	{RTE_IPV6(0x2001, 0x0200, 0, 0xe, 0, 0, 0, 0), 64, 14},
 	{RTE_IPV6(0x2001, 0x0200, 0, 0xf, 0, 0, 0, 0), 64, 15},
 };
+
 
 /*
  * API's called during initialization to setup ACL/EM/LPM rules.
@@ -1741,6 +1743,7 @@ main(int argc, char **argv)
 		}
 	}
 
+
 #ifdef RTE_LIB_EVENTDEV
 	if (evt_rsrc->enabled)
 		l3fwd_event_service_setup();
@@ -1759,6 +1762,7 @@ main(int argc, char **argv)
 				rte_exit(EXIT_FAILURE, "ptype check fails\n");
 		}
 	}
+
 
 	check_all_ports_link_status(enabled_port_mask);
 

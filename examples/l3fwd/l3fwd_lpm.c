@@ -181,15 +181,16 @@ lpm_main_loop(__rte_unused void *dummy)
 
 	cur_tsc = rte_rdtsc();
 	prev_tsc = cur_tsc;
+#ifndef DEFAULT_RX
 	int send_flag = 0;
-
+#endif
 	while (!force_quit) {
 
 		/*
 		 * TX burst queue drain
 		 */
 		i = 0;
-		/*
+
 		diff_tsc = cur_tsc - prev_tsc;
 		if (unlikely(diff_tsc > drain_tsc)) {
 
@@ -205,19 +206,21 @@ lpm_main_loop(__rte_unused void *dummy)
 
 			prev_tsc = cur_tsc;
 		}
-		*/
+
 		/*
 		 * Read packet from RX queues
 		 */
-		/* MODIFICATION STARTS */
-		// for (i = 0; i < n_rx_q; ++i) {
-		// 	portid = qconf->rx_queue_list[i].port_id;
-		// 	queueid = qconf->rx_queue_list[i].queue_id;
-		// 	nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
-		// 		rx_burst_size);
-		// 	if (nb_rx == 0)
-		// 		continue;
 
+		/* MODIFICATION STARTS */
+#ifdef DEFAULT_RX
+		for (i = 0; i < n_rx_q; ++i) {
+			portid = qconf->rx_queue_list[i].port_id;
+			queueid = qconf->rx_queue_list[i].queue_id;
+			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
+				rx_burst_size);
+			if (nb_rx == 0)
+				continue;
+#else
 		if (send_flag == 0) {
 			int burst_count = 0;
 			portid = qconf->rx_queue_list[0].port_id;
@@ -249,13 +252,13 @@ lpm_main_loop(__rte_unused void *dummy)
 			while (seq < start_seq + 30) {
 				char filename[256];
 				snprintf(filename, sizeof(filename),
-					"./pkts/pkt_lcore_%u_seq_%d.bin",
-					lcore_id, seq);
+	     "./pkts/pkt_lcore_%u_seq_%d.bin",
+	     lcore_id, seq);
 
 				FILE *fp = fopen(filename, "rb");
 				if (fp == NULL) {
 					printf("lcore %u: failed to open %s\n",
-					       lcore_id, filename);
+	    lcore_id, filename);
 					break; /* no more packet files */
 				}
 
@@ -297,19 +300,23 @@ lpm_main_loop(__rte_unused void *dummy)
 
 				if (burst_count == DEFAULT_PKT_BURST) {
 					nb_rx = burst_count;
+					#endif
 #if defined RTE_ARCH_X86 || defined __ARM_NEON \
 					|| defined RTE_ARCH_PPC_64
 					l3fwd_lpm_send_packets(nb_rx, pkts_burst,
-						portid, qconf);
+			    portid, qconf);
 #else
 					l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
-						portid, qconf);
+				   portid, qconf);
 #endif /* X86 */
+#ifndef DEFAULT_RX
 					burst_count = 0;
 				}
-			}
-			} /* end block loop */
+#endif
+		}
 
+#ifndef DEFAULT_RX
+			} /* end block loop */
 			/* flush remaining packets */
 			if (burst_count > 0) {
 				nb_rx = burst_count;
@@ -325,6 +332,7 @@ lpm_main_loop(__rte_unused void *dummy)
 
 			send_flag = 1;
 		}
+#endif
 		cur_tsc = rte_rdtsc();
 	}
 
