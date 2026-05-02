@@ -26,6 +26,7 @@
 #include <doca_flow.h>
 #include <doca_dev.h>
 #include <doca_dpdk.h>
+#include <doca_eth_rxq.h>
 #include "doca_error.h"
 
 #define DOCA_MAX_FLOWS (8096)
@@ -36,6 +37,8 @@ static struct doca_flow_pipe *doca_esp_spi_pipes[RTE_MAX_ETHPORTS];
 static struct doca_dev *doca_devs[RTE_MAX_ETHPORTS];
 
 static void mlx5_traffic_disable_legacy(struct rte_eth_dev *dev);
+
+doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_enable);
 
 static void
 entry_process_cb(struct doca_flow_pipe_entry *entry,
@@ -1981,12 +1984,12 @@ continue_dev_start:
 		}
 	}
 
+/*
 	if (mlx5_doca_flow_init(dev, "vnf") == 0) {
 		uint16_t port_id = dev->data->port_id;
 
 		doca_ports[port_id] = mlx5_create_doca_flow_port(dev);
 		if (doca_ports[port_id] != NULL) {
-			/* Step 1: ESP SPI steering pipe (non-root) */
 			if (mlx5_create_doca_esp_spi_pipe(doca_ports[port_id],
 							  &doca_esp_spi_pipes[port_id]) != 0 ||
 			    mlx5_add_esp_spi_entries(doca_ports[port_id],
@@ -1995,7 +1998,6 @@ continue_dev_start:
 				mlx5_doca_flow_teardown(dev);
 				goto rxq_start;
 			}
-			/* Step 2: Root pipe (match-all) → ESP SPI pipe */
 			if (mlx5_create_doca_root_basic_pipe(doca_ports[port_id],
 							     doca_esp_spi_pipes[port_id],
 							     &doca_root_pipes[port_id]) != 0 ||
@@ -2004,7 +2006,10 @@ continue_dev_start:
 				mlx5_doca_flow_teardown(dev);
 		}
 	}
-rxq_start:
+*/
+
+	eth_rxq_regular_receive("mlx5_1", true);
+
 
 	ret = mlx5_rxq_start(dev);
 	if (ret) {
