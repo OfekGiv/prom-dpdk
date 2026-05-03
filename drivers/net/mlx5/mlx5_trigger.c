@@ -38,7 +38,7 @@ static struct doca_dev *doca_devs[RTE_MAX_ETHPORTS];
 
 static void mlx5_traffic_disable_legacy(struct rte_eth_dev *dev);
 
-doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_enable);
+doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_enable, uint16_t nb_queues	);
 
 static void
 entry_process_cb(struct doca_flow_pipe_entry *entry,
@@ -2008,9 +2008,6 @@ continue_dev_start:
 	}
 */
 
-	eth_rxq_regular_receive("mlx5_1", true);
-
-
 	ret = mlx5_rxq_start(dev);
 	if (ret) {
 		DRV_LOG(ERR, "port %u Rx queue allocation failed: %s",
@@ -2018,6 +2015,9 @@ continue_dev_start:
 		SAVE_RTE_ERRNO_AND_STOP(ret, dev);
 		goto txq_stop;
 	}
+	printf("nb_rx_queues: %u\n", dev->data->nb_rx_queues);
+	eth_rxq_regular_receive("mlx5_1", true, dev->data->nb_rx_queues);
+
 	/*
 	 * Such step will be skipped if there is no hairpin TX queue configured
 	 * with RX peer queue from the same device.

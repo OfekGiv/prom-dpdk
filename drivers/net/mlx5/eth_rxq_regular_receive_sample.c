@@ -25,6 +25,7 @@
 
 #include <time.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include <doca_flow.h>
 #include <doca_buf.h>
@@ -52,6 +53,14 @@ DOCA_LOG_REGISTER(ETH_RXQ_REGULAR_RECEIVE);
 #define TASKS_NUM 1		    /* Tasks number */
 #define RECV_TASK_USER_DATA 0x43210 /* User data for receive task */
 
+static volatile sig_atomic_t g_stop_capture = 0;
+
+static void handle_stop_signal(int signo)
+{
+    (void)signo;
+    g_stop_capture = 1;
+}
+
 struct eth_rxq_sample_objects {
 	struct eth_core_resources core_resources;	 /* A struct to hold ETH core resources */
 	struct eth_flow_common_resources flow_resources; /* A struct to hold flow resources */
@@ -70,6 +79,7 @@ static void print_esp_sn(struct doca_buf *pkt)
     struct rte_ether_hdr *eth;
     struct rte_ipv4_hdr *ip4;
     uint8_t *esp;
+	uint32_t esp_spi;
     uint32_t esp_sn;
     uint16_t ether_type;
     size_t l2_len = sizeof(struct rte_ether_hdr);
@@ -98,9 +108,12 @@ static void print_esp_sn(struct doca_buf *pkt)
         return;
 
     esp = (uint8_t *)data + l2_len + ip_len;
+	memcpy(&esp_spi, esp, sizeof(esp_spi));
     memcpy(&esp_sn, esp + 4, sizeof(esp_sn)); /* skip SPI, read SN */
+	esp_spi = rte_be_to_cpu_32(esp_spi);
     esp_sn = rte_be_to_cpu_32(esp_sn);
 
+	DOCA_LOG_INFO("ESP SPI: %u", esp_spi);
     DOCA_LOG_INFO("ESP sequence number: %u", esp_sn);
 }
 
@@ -158,6 +171,8 @@ static void task_recv_common_cb(struct doca_eth_rxq_task_recv *task_recv,
 			else
 				DOCA_LOG_INFO("Received a packet with timestamp %lu", timestamp);
 		}
+
+		DOCA_LOG_INFO("Packet forwarded to RX queue %u", state->rxq_queue_id);
 
 		status = doca_buf_get_data_len(pkt, &packet_size);
 		if (status != DOCA_SUCCESS)
@@ -240,6 +255,27 @@ static doca_error_t destroy_eth_rxq_packet_buffers(struct eth_rxq_sample_objects
 }
 
 /*
+ * Submit ETH RXQ tasks
+ *
+ * @state [in/out]: eth_rxq_sample_objects struct to submit its tasks
+ * @return: DOCA_SUCCESS on success, DOCA_ERROR otherwise
+ */
+static doca_error_t submit_eth_rxq_tasks(struct eth_rxq_sample_objects *state)
+{
+	doca_error_t status;
+
+	status = doca_task_submit(doca_eth_rxq_task_recv_as_doca_task(state->recv_task));
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to submit receive task, err: %s", doca_error_get_name(status));
+		return status;
+	}
+
+	state->inflight_tasks++;
+
+	return DOCA_SUCCESS;
+}
+
+/*
  * Destroy ETH RXQ tasks
  *
  * @state [in]: eth_rxq_sample_objects struct to destroy its tasks
@@ -249,23 +285,7 @@ static void destroy_eth_rxq_tasks(struct eth_rxq_sample_objects *state)
 	doca_task_free(doca_eth_rxq_task_recv_as_doca_task(state->recv_task));
 }
 
-/*
- * Retrieve ETH RXQ tasks
- *
- * @state [in]: eth_rxq_sample_objects struct to retrieve tasks from
- */
-static void retrieve_rxq_recv_tasks(struct eth_rxq_sample_objects *state)
-{
-	struct timespec ts = {
-		.tv_sec = 0,
-		.tv_nsec = SLEEP_IN_NANOS,
-	};
 
-	while (state->inflight_tasks != 0) {
-		(void)doca_pe_progress(state->core_resources.core_objs.pe);
-		nanosleep(&ts, &ts);
-	}
-}
 
 /*
  * Create ETH RXQ context related resources
@@ -367,26 +387,7 @@ destroy_eth_rxq:
 	return status;
 }
 
-/*
- * Submit ETH RXQ tasks
- *
- * @state [in/out]: eth_rxq_sample_objects struct to submit its tasks
- * @return: DOCA_SUCCESS on success, DOCA_ERROR otherwise
- */
-static doca_error_t submit_eth_rxq_tasks(struct eth_rxq_sample_objects *state)
-{
-	doca_error_t status;
 
-	status = doca_task_submit(doca_eth_rxq_task_recv_as_doca_task(state->recv_task));
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to submit receive task, err: %s", doca_error_get_name(status));
-		return status;
-	}
-
-	state->inflight_tasks++;
-
-	return DOCA_SUCCESS;
-}
 
 /*
  * Create ETH RXQ tasks
@@ -513,13 +514,64 @@ static doca_error_t check_device(struct doca_devinfo *devinfo)
 }
 
 /*
+ * Retrieve ETH RXQ tasks
+ *
+ * @state [in]: eth_rxq_sample_objects struct to retrieve tasks from
+ */
+static doca_error_t retrieve_rxq_recv_tasks(struct eth_rxq_sample_objects *state)
+{
+    doca_error_t status;
+    struct timespec ts = {
+        .tv_sec = 0,
+        .tv_nsec = SLEEP_IN_NANOS,
+    };
+
+    while (!g_stop_capture) {
+        (void)doca_pe_progress(state->core_resources.core_objs.pe);
+
+        if (state->inflight_tasks == 0) {
+            status = create_eth_rxq_packet_buffer(state);
+            if (status != DOCA_SUCCESS) {
+                DOCA_LOG_ERR("Failed to create packet buffer, err: %s", doca_error_get_name(status));
+                return status;
+            }
+
+            status = create_eth_rxq_tasks(state);
+            if (status != DOCA_SUCCESS) {
+                DOCA_LOG_ERR("Failed to create receive task, err: %s", doca_error_get_name(status));
+                (void)destroy_eth_rxq_packet_buffers(state);
+                return status;
+            }
+
+            status = submit_eth_rxq_tasks(state);
+            if (status != DOCA_SUCCESS) {
+                DOCA_LOG_ERR("Failed to submit receive task, err: %s", doca_error_get_name(status));
+                destroy_eth_rxq_tasks(state);
+                (void)destroy_eth_rxq_packet_buffers(state);
+                return status;
+            }
+        }
+
+        nanosleep(&ts, &ts);
+    }
+
+    /* Drain any task that is already in flight before exit */
+    while (state->inflight_tasks != 0) {
+        (void)doca_pe_progress(state->core_resources.core_objs.pe);
+        nanosleep(&ts, &ts);
+    }
+
+    return DOCA_SUCCESS;
+}
+
+/*
  * Run ETH RXQ regular mode receive
  *
  * @ib_dev_name [in]: IB device name of a doca device
  * @timestamp_enable [in]: timestamp enable
  * @return: DOCA_SUCCESS on success, DOCA_ERROR otherwise
  */
-doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_enable)
+doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_enable, uint16_t nb_queues)
 {
 	doca_error_t result = DOCA_SUCCESS;
 	struct doca_log_backend *sdk_log;
@@ -530,6 +582,10 @@ doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_ena
 				      .check_device = check_device,
 				      .ibdev_name = ib_dev_name};
 	struct eth_flow_common_config flow_cfg = {};
+	uint16_t *rss_queues = NULL;
+
+	signal(SIGINT, handle_stop_signal);
+	signal(SIGTERM, handle_stop_signal);
 
 	/* Register a logger backend */
 	result = doca_log_backend_create_standard();
@@ -540,7 +596,7 @@ doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_ena
 	result = doca_log_backend_create_with_file_sdk(stderr, &sdk_log);
 	if (result != DOCA_SUCCESS)
 		goto rxq_cleanup;
-	result = doca_log_backend_set_sdk_level(sdk_log, DOCA_LOG_LEVEL_DEBUG);
+	result = doca_log_backend_set_sdk_level(sdk_log, DOCA_LOG_LEVEL_INFO);
 	if (result != DOCA_SUCCESS)
 		goto rxq_cleanup;
 
@@ -570,8 +626,29 @@ doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_ena
 		goto rxq_cleanup;
 	}
 
-	flow_cfg.rxq_queue_ids = &(state.rxq_queue_id);
-	flow_cfg.nb_queues = 1;
+	if (nb_queues == 0) {
+		DOCA_LOG_ERR("Invalid nb_queues=0");
+		status = DOCA_ERROR_INVALID_VALUE;
+		goto rxq_cleanup;
+	}
+
+	if (nb_queues > 1) {
+		DOCA_LOG_WARN("Only RX queue 0 is created in this sample; forcing RSS queue count from %u to 1",
+			      nb_queues);
+		nb_queues = 1;
+	}
+
+	rss_queues = calloc(nb_queues, sizeof(*rss_queues));
+	if (!rss_queues) {
+		DOCA_LOG_ERR("Failed to allocate memory for RSS queues");
+		status = DOCA_ERROR_NO_MEMORY;
+		goto rxq_cleanup;
+	}
+	for (uint16_t i = 0; i < nb_queues; i++) 
+		rss_queues[i] = i;
+	
+	flow_cfg.rxq_queue_ids = rss_queues;
+	flow_cfg.nb_queues = nb_queues;
 
 	status = eth_flow_common_create_flow_pipe(&flow_cfg, &(state.flow_resources));
 	if (status != DOCA_SUCCESS) {
@@ -597,7 +674,11 @@ doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_ena
 		goto destroy_rxq_tasks;
 	}
 
-	retrieve_rxq_recv_tasks(&state);
+	status = retrieve_rxq_recv_tasks(&state);
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Receive loop failed, err: %s", doca_error_get_name(status));
+		goto rxq_cleanup;
+	}
 
 	goto rxq_cleanup;
 
@@ -610,6 +691,8 @@ destroy_packet_buffers:
 rxq_cleanup:
 	DOCA_LOG_INFO("Finished");
 	eth_rxq_cleanup(&state);
+	free(rss_queues);
 
 	return status;
 }
+

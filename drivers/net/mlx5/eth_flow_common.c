@@ -157,9 +157,14 @@ static doca_error_t create_root_pipe(struct doca_flow_port *df_port,
 			{
 				.queues_array = rxq_queue_ids,
 				.nr_queues = nb_queues,
-				.outer_flags = DOCA_FLOW_RSS_IPV4 | DOCA_FLOW_RSS_UDP,
+				.outer_flags = DOCA_FLOW_RSS_ESP,
+				//.outer_flags = DOCA_FLOW_RSS_IPV4 | DOCA_FLOW_RSS_UDP,
 			},
 	};
+
+	DOCA_LOG_INFO("Number of RX queues %u", nb_queues);
+
+
 	struct doca_flow_fwd fwd_miss = {
 		.type = DOCA_FLOW_FWD_DROP,
 	};
