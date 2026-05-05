@@ -210,14 +210,15 @@ lpm_main_loop(__rte_unused void *dummy)
 		 * Read packet from RX queues
 		 */
 		/* MODIFICATION STARTS */
-		// for (i = 0; i < n_rx_q; ++i) {
-		// 	portid = qconf->rx_queue_list[i].port_id;
-		// 	queueid = qconf->rx_queue_list[i].queue_id;
-		// 	nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
-		// 		rx_burst_size);
-		// 	if (nb_rx == 0)
-		// 		continue;
-
+#ifndef PKTS_FROM_FILE
+		 for (i = 0; i < n_rx_q; ++i) {
+		 	portid = qconf->rx_queue_list[i].port_id;
+		 	queueid = qconf->rx_queue_list[i].queue_id;
+		 	nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
+		 		rx_burst_size);
+		 	if (nb_rx == 0)
+		 		continue;
+#else
 		if (send_flag == 0) {
 			int burst_count = 0;
 			portid = qconf->rx_queue_list[0].port_id;
@@ -291,11 +292,12 @@ lpm_main_loop(__rte_unused void *dummy)
 
 				pkts_burst[burst_count++] = m;
 				seq++;
-
 				/* MODIFICATION ENDS */
 
 				if (burst_count == DEFAULT_PKT_BURST) {
 					nb_rx = burst_count;
+
+#endif
 #if defined RTE_ARCH_X86 || defined __ARM_NEON \
 					|| defined RTE_ARCH_PPC_64
 					l3fwd_lpm_send_packets(nb_rx, pkts_burst,
@@ -304,6 +306,7 @@ lpm_main_loop(__rte_unused void *dummy)
 					l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
 						portid, qconf);
 #endif /* X86 */
+#ifdef PKTS_FROM_FILE
 					burst_count = 0;
 				}
 			} /* end block loop */
@@ -322,6 +325,7 @@ lpm_main_loop(__rte_unused void *dummy)
 			}
 
 			send_flag = 1;
+#endif
 		}
 		cur_tsc = rte_rdtsc();
 	}
