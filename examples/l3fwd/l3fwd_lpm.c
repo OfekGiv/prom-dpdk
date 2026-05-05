@@ -242,11 +242,10 @@ lpm_main_loop(__rte_unused void *dummy)
 			/* Read all 10 blocks of 32 packets, matching gen_pkts layout:
 			 * seq = (block * num_cores + lcore_index) * 32 + j
 			 */
-			for (int block = 0; block < 30; block++) {
-			int start_seq = (block * num_cores + lcore_index) * 30;
-			int seq = start_seq;
+			for (int block = 0; block < 900; block++) {
+				int start_seq = block * num_cores + lcore_index;
+				int seq = start_seq;
 
-			while (seq < start_seq + 30) {
 				char filename[256];
 				snprintf(filename, sizeof(filename),
 					"./pkts/pkt_lcore_%u_seq_%d.bin",
@@ -307,7 +306,6 @@ lpm_main_loop(__rte_unused void *dummy)
 #endif /* X86 */
 					burst_count = 0;
 				}
-			}
 			} /* end block loop */
 
 			/* flush remaining packets */

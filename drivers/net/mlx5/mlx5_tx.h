@@ -3242,6 +3242,7 @@ mlx5_tx_burst_single_send(struct mlx5_txq_data *__rte_restrict txq,
 	 */
 	MLX5_ASSERT(loc->elts_free && loc->wqe_free);
 	MLX5_ASSERT(pkts_n > loc->pkts_sent);
+	uint32_t log_group_size = txq->sh->mu_group.log_group_size;
 	pkts += loc->pkts_sent + 1;
 	pkts_n -= loc->pkts_sent;
 	for (;;) {
@@ -3487,8 +3488,21 @@ single_no_inline:
 				(txq, loc, &wqe->dseg[0],
 				 rte_pktmbuf_mtod(loc->mbuf, uint8_t *),
 				 rte_pktmbuf_data_len(loc->mbuf), olx);
-			++txq->wqe_ci;
-			--loc->wqe_free;
+			//++txq->wqe_ci;
+			//--loc->wqe_free;
+			txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
+			loc->wqe_free -= MLX5_MU_WQE_SIZE << log_group_size;
+
+			// Prepare doorbell ring
+			txq->uar_doorbell = *(uint64_t *)&loc->wqe_last->cseg;
+			// Set the current SQN to the doorbell ring
+			txq->uar_doorbell = txq->uar_doorbell & 0xFF000000FFFFFFFF;
+			txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_32(txq->qp_num_8s) << 32) | txq->uar_doorbell;
+			// Set the updated CI to the doorbell ring
+			txq->uar_doorbell = txq->uar_doorbell & 0x00FFFFFFFF0000FF;
+			uint8_t ds = (uint8_t)(MLX5_MU_WQE_SIZE << 2);
+			txq->uar_doorbell = ((uint64_t)ds << 56) | ((uint64_t)rte_cpu_to_be_16(txq->wqe_ci - MLX5_MU_WQE_SIZE) << 8) | txq->uar_doorbell;
+
 			/*
 			 * We should not store mbuf pointer in elts
 			 * if no inlining is configured, this is done
@@ -3553,27 +3567,6 @@ ordinary_send:
 		/* The resources to send one packet should remain. */
 		MLX5_ASSERT(loc->elts_free && loc->wqe_free);
 	}
-}
-
-static __rte_always_inline void
-mlx5_tx_wait_wqe_free(struct mlx5_txq_data *__rte_restrict txq,
-                      struct mlx5_txq_local *__rte_restrict loc,
-                      unsigned int olx,
-                      uint16_t need)
-{
-    for (;;) {
-        /* producer step: harvest CQEs and advance wqe_pi */
-        mlx5_tx_handle_completion(txq, olx);
-
-        /* recompute available WQE slots exactly like mlx5_tx_burst_tmpl() */
-        uint16_t slots = txq->wqe_s >> txq->sh->mu_group.log_group_size;
-        loc->wqe_free = slots -
-            ((uint16_t)(txq->wqe_ci + slots - txq->wqe_pi) % slots);
-
-        if (likely(loc->wqe_free >= need))
-            return;
-        /* busy spin: no pause/yield yet */
-    }
 }
 
 /**
@@ -3645,14 +3638,13 @@ send_loop:
 	loc.wqe_free = likely(used <= txq->wqe_s) ?
 			(uint16_t)(txq->wqe_s - used) : 0;
 
+	if (unlikely(loc.wqe_free < 2))
+		DRV_LOG(WARNING, "<<<<<<<<< Reached WQE free threshold.");
+
 	//loc.wqe_free = txq->wqe_s -
 	//			(uint16_t)(txq->wqe_ci - txq->wqe_pi);
-	if (unlikely(!loc.elts_free))
+	if (unlikely(!loc.elts_free || !loc.wqe_free))
 		goto burst_exit;
-
-	if (unlikely(loc.wqe_free == 0)) {
-		mlx5_tx_wait_wqe_free(txq, &loc, olx, 1);
-	}
 
 	for (;;) {
 		/*

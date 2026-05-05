@@ -147,6 +147,7 @@ mlx5_os_capabilities_prepare(struct mlx5_dev_ctx_shared *sh)
 	struct ibv_device_attr_ex attr_ex = { .comp_mask = 0 };
 	struct mlx5dv_context dv_attr = { .comp_mask = 0 };
 
+
 	err = mlx5_glue->query_device_ex(cdev->ctx, NULL, &attr_ex);
 	if (err) {
 		rte_errno = errno;
@@ -193,6 +194,7 @@ mlx5_os_capabilities_prepare(struct mlx5_dev_ctx_shared *sh)
 	 * Multi-packet send is supported by ConnectX-4 Lx PF as well
 	 * as all ConnectX-5 devices.
 	 */
+	dv_attr.flags &= ~MLX5DV_CONTEXT_FLAGS_MPW_ALLOWED;
 	if (dv_attr.flags & MLX5DV_CONTEXT_FLAGS_MPW_ALLOWED) {
 		if (dv_attr.flags & MLX5DV_CONTEXT_FLAGS_ENHANCED_MPW) {
 			DRV_LOG(DEBUG, "Enhanced MPW is supported.");

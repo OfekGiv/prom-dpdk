@@ -89,7 +89,7 @@
  * that slaves sharing the SQ remain slot-aligned.
  * Natural min for burst_size=32 is ceil((2 + 32) / 4) = 8.
  */
-#define MLX5_MU_WQE_SIZE 8
+#define MLX5_MU_WQE_SIZE 1
 
 enum mlx5_ipool_index {
 #if defined(HAVE_IBV_FLOW_DV_SUPPORT) || !defined(HAVE_INFINIBAND_VERBS_H)
