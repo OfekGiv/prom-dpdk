@@ -11,6 +11,7 @@
 #include <rte_interrupts.h>
 #include <rte_alarm.h>
 #include <rte_cycles.h>
+#include <rte_pci.h>
 
 #include <mlx5_malloc.h>
 
@@ -22,7 +23,496 @@
 #include "rte_common.h"
 #include "rte_pmd_mlx5.h"
 
+#include <doca_flow.h>
+#include <doca_dev.h>
+#include <doca_dpdk.h>
+#include <doca_eth_rxq.h>
+#include "doca_error.h"
+
+#define DOCA_MAX_FLOWS (8096)
+
+static struct doca_flow_port *doca_ports[RTE_MAX_ETHPORTS];
+static struct doca_flow_pipe *doca_root_pipes[RTE_MAX_ETHPORTS];
+static struct doca_flow_pipe *doca_esp_spi_pipes[RTE_MAX_ETHPORTS];
+static struct doca_dev *doca_devs[RTE_MAX_ETHPORTS];
+
 static void mlx5_traffic_disable_legacy(struct rte_eth_dev *dev);
+
+doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_enable, uint16_t nb_queues	);
+
+static void
+entry_process_cb(struct doca_flow_pipe_entry *entry,
+                 uint16_t pipe_queue,
+                 enum doca_flow_entry_status status,
+                 enum doca_flow_entry_op op,
+                 void *user_ctx)
+{
+    const char *op_str = "UNKNOWN";
+
+    switch (op) {
+    case DOCA_FLOW_ENTRY_OP_ADD:
+        op_str = "ADD";
+        break;
+    case DOCA_FLOW_ENTRY_OP_DEL:
+        op_str = "DEL";
+        break;
+    default:
+        break;
+    }
+
+    printf("DOCA Flow entry process callback:\n");
+    printf("  entry      = %p\n", (void *)entry);
+    printf("  queue      = %u\n", pipe_queue);
+    printf("  operation  = %s\n", op_str);
+    printf("  status     = %d\n", status);
+    printf("  user_ctx   = %p\n", user_ctx);
+
+    if (status != DOCA_FLOW_ENTRY_STATUS_SUCCESS) {
+        printf("  result     = FAILED\n");
+    } else {
+        printf("  result     = SUCCESS\n");
+    }
+}
+
+static int mlx5_doca_flow_init(struct rte_eth_dev *dev, const char *mode)
+{
+	struct doca_flow_cfg *flow_cfg;
+	doca_error_t result, tmp_result;
+	struct mlx5_priv *priv = dev->data->dev_private;
+
+	result = doca_flow_cfg_create(&flow_cfg);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "doca_flow_cfg_create failed\n");
+		return -1;
+	}
+
+	result = doca_flow_cfg_set_pipe_queues(flow_cfg, priv->rxqs_n);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to set doca_flow_cfg pipe_queues: %s", doca_error_get_descr(result));
+		goto destroy_cfg;
+	}
+
+	result = doca_flow_cfg_set_mode_args(flow_cfg, mode);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to set doca_flow_cfg mode_args: %s", doca_error_get_descr(result));
+		goto destroy_cfg;
+	}
+
+	/*
+	result = doca_flow_cfg_set_resource_mode(flow_cfg, DOCA_FLOW_RESOURCE_MODE_PORT);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to set doca_flow_cfg resource mode: %s", doca_error_get_descr(result));
+		goto destroy_cfg;
+	}
+	*/
+
+	result = doca_flow_cfg_set_cb_entry_process(flow_cfg, entry_process_cb);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to set doca_flow_cfg cb_entry_process: %s", doca_error_get_descr(result));
+		goto destroy_cfg;
+	}
+
+	result = doca_flow_init(flow_cfg);
+	if (result != DOCA_SUCCESS)
+		DRV_LOG(ERR, "Failed to initialize doca flow: %s", doca_error_get_descr(result));
+
+destroy_cfg:
+	tmp_result = doca_flow_cfg_destroy(flow_cfg);
+	if (tmp_result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to destroy doca_flow_cfg: %s", doca_error_get_descr(tmp_result));
+		DOCA_ERROR_PROPAGATE(result, tmp_result);
+	}
+	return (result == DOCA_SUCCESS) ? 0 : -1;
+}
+
+static struct doca_dev *
+mlx5_open_doca_dev(struct rte_eth_dev *dev)
+{
+	struct mlx5_priv *priv = dev->data->dev_private;
+	struct doca_devinfo **dev_list = NULL;
+	struct doca_dev *doca_dev = NULL;
+	char pci_addr[PCI_PRI_STR_SIZE] = {0};
+	uint32_t nb_devs = 0;
+	uint32_t index;
+	doca_error_t result;
+	doca_error_t tmp_result;
+
+	if (priv->pci_dev == NULL) {
+		DRV_LOG(ERR, "Port %u is not backed by a PCI device",
+			dev->data->port_id);
+		return NULL;
+	}
+	rte_pci_device_name(&priv->pci_dev->addr, pci_addr, sizeof(pci_addr));
+	result = doca_devinfo_create_list(&dev_list, &nb_devs);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to enumerate DOCA devices for %s: %s",
+			pci_addr, doca_error_get_descr(result));
+		return NULL;
+	}
+	result = DOCA_ERROR_NOT_FOUND;
+	for (index = 0; index < nb_devs; index++) {
+		uint8_t is_equal = 0;
+
+		tmp_result = doca_devinfo_is_equal_pci_addr(dev_list[index],
+							    pci_addr, &is_equal);
+		if (tmp_result != DOCA_SUCCESS) {
+			DRV_LOG(DEBUG, "Failed to compare DOCA PCI address for %s: %s",
+				pci_addr, doca_error_get_descr(tmp_result));
+			continue;
+		}
+		if (!is_equal)
+			continue;
+		result = doca_dev_open(dev_list[index], &doca_dev);
+		if (result != DOCA_SUCCESS) {
+			DRV_LOG(ERR, "Failed to open DOCA device for %s: %s",
+				pci_addr, doca_error_get_descr(result));
+			doca_dev = NULL;
+		}
+		break;
+	}
+	tmp_result = doca_devinfo_destroy_list(dev_list);
+	if (tmp_result != DOCA_SUCCESS) {
+		DRV_LOG(WARNING, "Failed to destroy DOCA device list: %s",
+			doca_error_get_descr(tmp_result));
+	}
+	if (doca_dev == NULL && result == DOCA_ERROR_NOT_FOUND) {
+		DRV_LOG(ERR, "No DOCA device matches PCI address %s", pci_addr);
+	}
+	return doca_dev;
+}
+
+static struct doca_flow_port *mlx5_create_doca_flow_port(struct rte_eth_dev *dev)
+{
+	struct doca_flow_port_cfg *port_cfg;
+	doca_error_t result, tmp_result;
+	struct doca_flow_port *port;
+	uint16_t port_id = dev->data->port_id;
+
+	doca_devs[port_id] = mlx5_open_doca_dev(dev);
+	if (doca_devs[port_id] == NULL) {
+		DRV_LOG(ERR, "Failed to open DOCA device for port %u", port_id);
+		return NULL;
+	}
+
+	result = doca_flow_port_cfg_create(&port_cfg);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to create doca_flow_port_cfg: %s", doca_error_get_descr(result));
+		doca_dev_close(doca_devs[port_id]);
+		doca_devs[port_id] = NULL;
+		return NULL;
+	}
+
+	result = doca_flow_port_cfg_set_port_id(port_cfg, port_id);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to set doca_flow_port_cfg port_id: %s", doca_error_get_descr(result));
+		goto destroy_port_cfg;
+	}
+
+	result = doca_flow_port_cfg_set_dev(port_cfg, doca_devs[port_id]);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to set doca_flow_port_cfg doca device: %s", doca_error_get_descr(result));
+		goto destroy_port_cfg;
+	}
+
+	result = doca_flow_port_cfg_set_actions_mem_size(
+		port_cfg,
+		rte_align32pow2(DOCA_MAX_FLOWS * DOCA_FLOW_MAX_ENTRY_ACTIONS_MEM_SIZE));
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to set doca_flow_port_cfg actions mem size: %s", doca_error_get_descr(result));
+		goto destroy_port_cfg;
+	}
+
+	result = doca_flow_port_start(port_cfg, &port);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to start doca_flow port: %s", doca_error_get_descr(result));
+		goto destroy_port_cfg;
+	}
+
+destroy_port_cfg:
+	tmp_result = doca_flow_port_cfg_destroy(port_cfg);
+	if (tmp_result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to destroy doca_flow port: %s", doca_error_get_descr(tmp_result));
+		DOCA_ERROR_PROPAGATE(result, tmp_result);
+	}
+	if (result != DOCA_SUCCESS && doca_devs[port_id] != NULL) {
+		tmp_result = doca_dev_close(doca_devs[port_id]);
+		if (tmp_result != DOCA_SUCCESS) {
+			DRV_LOG(WARNING, "Failed to close DOCA device for port %u: %s",
+				port_id, doca_error_get_descr(tmp_result));
+		}
+		doca_devs[port_id] = NULL;
+	}
+
+	return result == DOCA_SUCCESS ? port : NULL;
+}
+
+static bool
+mlx5_doca_flow_ports_active(void)
+{
+	uint16_t port_id;
+
+	for (port_id = 0; port_id < RTE_MAX_ETHPORTS; port_id++) {
+		if (doca_ports[port_id] != NULL)
+			return true;
+	}
+	return false;
+}
+
+static void
+mlx5_doca_flow_teardown(struct rte_eth_dev *dev)
+{
+	uint16_t port_id = dev->data->port_id;
+	doca_error_t result;
+
+	if (doca_root_pipes[port_id] != NULL) {
+		doca_flow_pipe_destroy(doca_root_pipes[port_id]);
+		doca_root_pipes[port_id] = NULL;
+	}
+	if (doca_esp_spi_pipes[port_id] != NULL) {
+		doca_flow_pipe_destroy(doca_esp_spi_pipes[port_id]);
+		doca_esp_spi_pipes[port_id] = NULL;
+	}
+	if (doca_ports[port_id] != NULL) {
+		doca_flow_port_pipes_flush(doca_ports[port_id]);
+		result = doca_flow_port_stop(doca_ports[port_id]);
+		if (result != DOCA_SUCCESS) {
+			DRV_LOG(WARNING, "Failed to stop DOCA flow port %u: %s",
+				port_id, doca_error_get_descr(result));
+		}
+		doca_ports[port_id] = NULL;
+	}
+	if (doca_devs[port_id] != NULL) {
+		result = doca_dev_close(doca_devs[port_id]);
+		if (result != DOCA_SUCCESS) {
+			DRV_LOG(WARNING, "Failed to close DOCA device for port %u: %s",
+				port_id, doca_error_get_descr(result));
+		}
+		doca_devs[port_id] = NULL;
+	}
+	if (!mlx5_doca_flow_ports_active())
+		doca_flow_destroy();
+}
+
+/*
+ * Create a non-root BASIC pipe that steers ESP packets by SPI to individual
+ * RX queues.  The pipe uses DOCA_FLOW_FWD_CHANGEABLE so each entry can
+ * supply its own forwarding action (single-queue RSS).
+ *
+ * Match template: outer ESP, full SPI mask (0xFFFFFFFF).
+ */
+static int
+mlx5_create_doca_esp_spi_pipe(struct doca_flow_port *port,
+			      struct doca_flow_pipe **pipe_out)
+{
+	struct doca_flow_pipe_cfg *pipe_cfg = NULL;
+	struct doca_flow_pipe *pipe = NULL;
+	struct doca_flow_match match = {0};
+	struct doca_flow_match match_mask = {0};
+	struct doca_flow_actions actions = {0};
+	struct doca_flow_actions *actions_arr[] = {&actions};
+	struct doca_flow_fwd fwd = {0};
+	struct doca_flow_fwd fwd_miss = {0};
+	doca_error_t result;
+
+	/* Template: entry supplies ESP SPI; tunnel type remains ESP. */
+	match.tun.type = DOCA_FLOW_TUN_ESP;
+	match.tun.esp_spi = RTE_BE32(0xFFFFFFFF);
+	match_mask.tun.type = UINT32_MAX;
+	match_mask.tun.esp_spi = RTE_BE32(0xFFFFFFFF);
+
+	result = doca_flow_pipe_cfg_create(&pipe_cfg, port);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to create esp_spi pipe_cfg: %s",
+			doca_error_get_descr(result));
+		return -1;
+	}
+	result = doca_flow_pipe_cfg_set_name(pipe_cfg, "mlx5_esp_spi");
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_type(pipe_cfg, DOCA_FLOW_PIPE_BASIC);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_domain(pipe_cfg,
+					      DOCA_FLOW_PIPE_DOMAIN_SECURE_INGRESS);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_is_root(pipe_cfg, false);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_nr_entries(pipe_cfg, DOCA_MAX_FLOWS);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_match(pipe_cfg, &match, &match_mask);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_actions(pipe_cfg, actions_arr,
+					     NULL, NULL, 1);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	/*
+	 * Use changeable RSS template: entry-level forwarding will provide
+	 * concrete queue and RSS flags.
+	 */
+	fwd.type = DOCA_FLOW_FWD_RSS;
+	fwd.rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED;
+	fwd.rss.nr_queues = -1;
+	fwd_miss.type = DOCA_FLOW_FWD_DROP;
+	result = doca_flow_pipe_create(pipe_cfg, &fwd, &fwd_miss, &pipe);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to create esp_spi pipe: %s",
+			doca_error_get_descr(result));
+		goto destroy_cfg;
+	}
+	*pipe_out = pipe;
+
+destroy_cfg:
+	if (pipe_cfg)
+		doca_flow_pipe_cfg_destroy(pipe_cfg);
+	return (result == DOCA_SUCCESS) ? 0 : -1;
+}
+
+/*
+ * Add one entry per RX queue into the ESP SPI pipe:
+ *   SPI = htonl(queue + 1)  →  RSS { queues=[queue], nr_queues=1 }
+ *
+ * The sender cycles SPI=1,2,...,nr_queues,1,2,... for round-robin delivery.
+ */
+static int
+mlx5_add_esp_spi_entries(struct doca_flow_port *port,
+			  struct doca_flow_pipe *pipe,
+			  uint16_t nr_queues)
+{
+	uint16_t q;
+
+	for (q = 0; q < nr_queues; q++) {
+		struct doca_flow_match match = {0};
+		struct doca_flow_fwd fwd = {0};
+		struct doca_flow_pipe_entry *entry = NULL;
+		uint16_t queues_arr[1] = {q};
+		doca_error_t result;
+
+		/* SPI value for this queue (1-based, network byte order) */
+		match.tun.type = DOCA_FLOW_TUN_ESP;
+		match.tun.esp_spi = rte_cpu_to_be_32((uint32_t)q + 1);
+
+		/* Forward to a single RX queue via RSS */
+		fwd.type = DOCA_FLOW_FWD_RSS;
+		fwd.rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED;
+		fwd.rss.outer_flags = DOCA_FLOW_RSS_ESP;
+		fwd.rss.queues_array = queues_arr;
+		fwd.rss.nr_queues = 1;
+
+		result = doca_flow_pipe_basic_add_entry(0, pipe, &match, 0,
+						    NULL, NULL, &fwd,
+						    DOCA_FLOW_ENTRY_FLAGS_NO_WAIT,
+						    NULL, &entry);
+		if (result != DOCA_SUCCESS) {
+			DRV_LOG(ERR, "Failed to add ESP SPI entry q%u: %s",
+				q, doca_error_get_descr(result));
+			return -1;
+		}
+		result = doca_flow_entries_process(port, 0, 0, 1);
+		if (result != DOCA_SUCCESS) {
+			DRV_LOG(ERR, "Failed to process ESP SPI entry q%u: %s",
+				q, doca_error_get_descr(result));
+			return -1;
+		}
+		if (doca_flow_pipe_entry_get_status(entry) !=
+		    DOCA_FLOW_ENTRY_STATUS_SUCCESS) {
+			DRV_LOG(ERR, "ESP SPI entry q%u not offloaded", q);
+			return -1;
+		}
+		DRV_LOG(DEBUG, "ESP SPI entry: SPI=0x%08x → queue %u",
+			rte_be_to_cpu_32(match.tun.esp_spi), q);
+	}
+	return 0;
+}
+
+static int
+mlx5_create_doca_root_basic_pipe(struct doca_flow_port *port,
+				 struct doca_flow_pipe *next_pipe,
+				 struct doca_flow_pipe **pipe_out)
+{
+	struct doca_flow_pipe_cfg *pipe_cfg = NULL;
+	struct doca_flow_pipe *pipe = NULL;
+	struct doca_flow_match match = {0};
+	struct doca_flow_actions actions = {0};
+	struct doca_flow_actions *actions_arr[] = {&actions};
+	struct doca_flow_fwd fwd = {0};
+	struct doca_flow_fwd fwd_miss = {0};
+	doca_error_t result;
+
+	result = doca_flow_pipe_cfg_create(&pipe_cfg, port);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to create doca_flow_pipe_cfg: %s",
+			doca_error_get_descr(result));
+		return -1;
+	}
+	result = doca_flow_pipe_cfg_set_name(pipe_cfg, "mlx5_root_basic");
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_type(pipe_cfg, DOCA_FLOW_PIPE_BASIC);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_is_root(pipe_cfg, true);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_nr_entries(pipe_cfg, DOCA_MAX_FLOWS);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_match(pipe_cfg, &match, &match);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	result = doca_flow_pipe_cfg_set_actions(pipe_cfg, actions_arr,
+					     NULL, NULL, 1);
+	if (result != DOCA_SUCCESS)
+		goto destroy_cfg;
+	fwd.type = DOCA_FLOW_FWD_PIPE;
+	fwd.next_pipe = next_pipe;
+	fwd_miss.type = DOCA_FLOW_FWD_DROP;
+	result = doca_flow_pipe_create(pipe_cfg, &fwd, &fwd_miss, &pipe);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to create root basic pipe: %s",
+			doca_error_get_descr(result));
+		goto destroy_cfg;
+	}
+	*pipe_out = pipe;
+
+destroy_cfg:
+	if (pipe_cfg)
+		doca_flow_pipe_cfg_destroy(pipe_cfg);
+	return (result == DOCA_SUCCESS) ? 0 : -1;
+}
+
+static int
+mlx5_add_doca_root_entry(struct doca_flow_port *port, struct doca_flow_pipe *pipe)
+{
+	struct doca_flow_match match = {0};
+	struct doca_flow_actions actions = {0};
+	struct doca_flow_pipe_entry *entry = NULL;
+	doca_error_t result;
+
+	result = doca_flow_pipe_basic_add_entry(0, pipe, &match, 0,
+						&actions, NULL, NULL,
+						DOCA_FLOW_ENTRY_FLAGS_NO_WAIT,
+						NULL, &entry);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to add root pipe entry: %s",
+			doca_error_get_descr(result));
+		return -1;
+	}
+	result = doca_flow_entries_process(port, 0, 0, 1);
+	if (result != DOCA_SUCCESS) {
+		DRV_LOG(ERR, "Failed to process DOCA entries: %s",
+			doca_error_get_descr(result));
+		return -1;
+	}
+	if (doca_flow_pipe_entry_get_status(entry) != DOCA_FLOW_ENTRY_STATUS_SUCCESS) {
+		DRV_LOG(ERR, "Root pipe entry was not offloaded successfully");
+		return -1;
+	}
+	return 0;
+}
 
 /**
  * Stop traffic on Tx queues.
@@ -1493,6 +1983,31 @@ continue_dev_start:
 				dev->data->port_id);
 		}
 	}
+
+/*
+	if (mlx5_doca_flow_init(dev, "vnf") == 0) {
+		uint16_t port_id = dev->data->port_id;
+
+		doca_ports[port_id] = mlx5_create_doca_flow_port(dev);
+		if (doca_ports[port_id] != NULL) {
+			if (mlx5_create_doca_esp_spi_pipe(doca_ports[port_id],
+							  &doca_esp_spi_pipes[port_id]) != 0 ||
+			    mlx5_add_esp_spi_entries(doca_ports[port_id],
+						     doca_esp_spi_pipes[port_id],
+						     priv->rxqs_n) != 0) {
+				mlx5_doca_flow_teardown(dev);
+				goto rxq_start;
+			}
+			if (mlx5_create_doca_root_basic_pipe(doca_ports[port_id],
+							     doca_esp_spi_pipes[port_id],
+							     &doca_root_pipes[port_id]) != 0 ||
+			    mlx5_add_doca_root_entry(doca_ports[port_id],
+						     doca_root_pipes[port_id]) != 0)
+				mlx5_doca_flow_teardown(dev);
+		}
+	}
+*/
+
 	ret = mlx5_rxq_start(dev);
 	if (ret) {
 		DRV_LOG(ERR, "port %u Rx queue allocation failed: %s",
@@ -1500,6 +2015,9 @@ continue_dev_start:
 		SAVE_RTE_ERRNO_AND_STOP(ret, dev);
 		goto txq_stop;
 	}
+	printf("nb_rx_queues: %u\n", dev->data->nb_rx_queues);
+	eth_rxq_regular_receive("mlx5_1", true, dev->data->nb_rx_queues);
+
 	/*
 	 * Such step will be skipped if there is no hairpin TX queue configured
 	 * with RX peer queue from the same device.
@@ -1613,6 +2131,7 @@ rx_intr_vec_disable:
 rxq_stop:
 	mlx5_rxq_stop(dev);
 txq_stop:
+	mlx5_doca_flow_teardown(dev);
 	mlx5_txq_stop(dev);
 free_consec_tx_mem:
 	mlx5_dev_free_consec_tx_mem(dev, false);
@@ -1729,6 +2248,7 @@ continue_dev_stop:
 	mlx5_flow_stop_default(dev);
 	/* Control flows for default traffic can be removed firstly. */
 	mlx5_traffic_disable(dev);
+	mlx5_doca_flow_teardown(dev);
 	/* All RX queue flags will be cleared in the flush interface. */
 	mlx5_flow_list_flush(dev, MLX5_FLOW_TYPE_GEN, true);
 	mlx5_flow_meter_rxq_flush(dev);

@@ -2,6 +2,7 @@
 # Copyright 2018 6WIND S.A.
 # Copyright 2018 Mellanox Technologies, Ltd
 
+
 if not (is_linux or is_windows)
     build = false
     reason = 'only supported on Linux and Windows'
@@ -45,6 +46,12 @@ sources = files(
         'mlx5_txq.c',
         'mlx5_utils.c',
         'mlx5_vlan.c',
+        'eth_common.c',
+        'common.c',
+        'eth_flow_common.c',
+        'eth_rxq_common.c',
+        'eth_rxq_regular_receive_sample.c',
+
 )
 
 if is_linux
@@ -79,6 +86,7 @@ cflags_options = [
         '-D_BSD_SOURCE',
         '-D_DEFAULT_SOURCE',
         '-D_XOPEN_SOURCE=600',
+        '-DDOCA_ALLOW_EXPERIMENTAL_API',
 ]
 foreach option:cflags_options
     if cc.has_argument(option)
@@ -100,3 +108,18 @@ subdir(exec_env)
 subdir('hws')
 
 annotate_locks = false
+
+includes += include_directories('/opt/mellanox/doca/include')
+stdcpp_dep = cc.find_library('stdc++', required: true)
+if not cc.links(min_c_code, dependencies: stdcpp_dep)
+    error('broken dependency, "libstdc++"')
+endif
+dependency('doca-common', method: 'pkg-config', static: true)
+dependency('doca-eth', method: 'pkg-config', static: true)
+ext_deps += [
+    cc.find_library('doca_flow', dirs: '/opt/mellanox/doca/lib/x86_64-linux-gnu'),
+    cc.find_library('doca_common', dirs: '/opt/mellanox/doca/lib/x86_64-linux-gnu'),
+    cc.find_library('doca_eth', dirs: '/opt/mellanox/doca/lib/x86_64-linux-gnu'),
+    cc.find_library('doca_dpdk_bridge', dirs: '/opt/mellanox/doca/lib/x86_64-linux-gnu', static: true),
+    stdcpp_dep,
+]
