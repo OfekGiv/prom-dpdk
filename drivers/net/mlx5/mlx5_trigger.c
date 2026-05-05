@@ -28,6 +28,7 @@
 #include <doca_dpdk.h>
 #include <doca_eth_rxq.h>
 #include "doca_error.h"
+#include "eth_rxq_regular_receive_sample.h"
 
 #define DOCA_MAX_FLOWS (8096)
 
@@ -38,7 +39,23 @@ static struct doca_dev *doca_devs[RTE_MAX_ETHPORTS];
 
 static void mlx5_traffic_disable_legacy(struct rte_eth_dev *dev);
 
-doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_enable, uint16_t nb_queues	);
+/* PoC: two DOCA RXQ handles, demuxed by ESP SN LSB. */
+#define MLX5_DOCA_RXQ_NUM 2
+static struct eth_rxq_sample_objects *g_doca_rxq_handle[MLX5_DOCA_RXQ_NUM];
+
+static uint16_t
+mlx5_doca_rx_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
+{
+	struct mlx5_rxq_data *rxq_data = rxq;
+	uint16_t idx;
+
+	if (unlikely(rxq_data == NULL))
+		return 0;
+	idx = rxq_data->idx;
+	if (idx >= MLX5_DOCA_RXQ_NUM || g_doca_rxq_handle[idx] == NULL)
+		return 0;
+	return eth_rxq_poll(g_doca_rxq_handle[idx], rx_pkts, nb_pkts);
+}
 
 static void
 entry_process_cb(struct doca_flow_pipe_entry *entry,
@@ -2016,7 +2033,51 @@ continue_dev_start:
 		goto txq_stop;
 	}
 	printf("nb_rx_queues: %u\n", dev->data->nb_rx_queues);
-	eth_rxq_regular_receive("mlx5_1", true, dev->data->nb_rx_queues);
+	if (g_doca_rxq_handle[0] == NULL && dev->data->nb_rx_queues >= MLX5_DOCA_RXQ_NUM) {
+		bool open_ok = true;
+
+		for (uint16_t i = 0; i < MLX5_DOCA_RXQ_NUM; i++) {
+			struct mlx5_rxq_data *rxqi = dev->data->rx_queues[i];
+			doca_error_t drc;
+
+			if (rxqi == NULL || rxqi->mp == NULL) {
+				DRV_LOG(WARNING, "port %u rxq[%u] not ready; skipping DOCA RXQ open",
+					dev->data->port_id, i);
+				open_ok = false;
+				break;
+			}
+			drc = eth_rxq_open(&g_doca_rxq_handle[i], "mlx5_1", true, i, rxqi->mp);
+			if (drc != DOCA_SUCCESS) {
+				DRV_LOG(ERR, "port %u eth_rxq_open[%u] failed: %s",
+					dev->data->port_id, i, doca_error_get_descr(drc));
+				g_doca_rxq_handle[i] = NULL;
+				open_ok = false;
+				break;
+			}
+		}
+
+		if (open_ok) {
+			doca_error_t drc = eth_rxq_install_lsb_demux_flow(g_doca_rxq_handle);
+
+			if (drc != DOCA_SUCCESS) {
+				DRV_LOG(ERR, "port %u eth_rxq_install_lsb_demux_flow failed: %s",
+					dev->data->port_id, doca_error_get_descr(drc));
+				open_ok = false;
+			}
+		}
+
+		if (!open_ok) {
+			for (uint16_t i = 0; i < MLX5_DOCA_RXQ_NUM; i++) {
+				if (g_doca_rxq_handle[i] != NULL) {
+					eth_rxq_close(g_doca_rxq_handle[i]);
+					g_doca_rxq_handle[i] = NULL;
+				}
+			}
+		}
+	} else if (dev->data->nb_rx_queues < MLX5_DOCA_RXQ_NUM) {
+		DRV_LOG(WARNING, "port %u has %u rx queues; need >= %u for DOCA LSB demux",
+			dev->data->port_id, dev->data->nb_rx_queues, MLX5_DOCA_RXQ_NUM);
+	}
 
 	/*
 	 * Such step will be skipped if there is no hairpin TX queue configured
@@ -2098,6 +2159,8 @@ continue_dev_start:
 	rte_wmb();
 	dev->tx_pkt_burst = mlx5_select_tx_function(dev);
 	dev->rx_pkt_burst = mlx5_select_rx_function(dev);
+	if (g_doca_rxq_handle[0] != NULL)
+		dev->rx_pkt_burst = mlx5_doca_rx_burst;
 	/* Enable datapath on secondary process. */
 	mlx5_mp_os_req_start_rxtx(dev);
 	if (rte_intr_fd_get(priv->sh->intr_handle) >= 0) {
@@ -2237,6 +2300,15 @@ continue_dev_stop:
 	dev->data->dev_started = 0;
 	/* Prevent crashes when queues are still in use. */
 	dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
+	if (g_doca_rxq_handle[0] != NULL) {
+		eth_rxq_uninstall_demux_flow();
+		for (uint16_t i = 0; i < MLX5_DOCA_RXQ_NUM; i++) {
+			if (g_doca_rxq_handle[i] != NULL) {
+				eth_rxq_close(g_doca_rxq_handle[i]);
+				g_doca_rxq_handle[i] = NULL;
+			}
+		}
+	}
 	dev->tx_pkt_burst = rte_eth_pkt_burst_dummy;
 	rte_wmb();
 	/* Disable datapath on secondary process. */
@@ -2859,4 +2931,5 @@ mlx5_traffic_vlan_remove(struct rte_eth_dev *dev, const uint16_t vid)
 
 	return 0;
 }
+
 
