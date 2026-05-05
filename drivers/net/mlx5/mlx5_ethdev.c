@@ -719,6 +719,7 @@ eth_rx_burst_t
 mlx5_select_rx_function(struct rte_eth_dev *dev)
 {
 	eth_rx_burst_t rx_pkt_burst = mlx5_rx_burst;
+	return rx_pkt_burst;
 
 	MLX5_ASSERT(dev != NULL);
 	if (mlx5_shared_rq_enabled(dev)) {

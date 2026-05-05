@@ -43,7 +43,9 @@ static struct rte_lpm6 *ipv6_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 
 /* MODIFICATION STARTS */
 //extern struct rte_mempool *pktmbuf_pool;
+#ifdef PKTS_FROM_FILE
 extern struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
+#endif
 /* MODIFICATION ENDS */
 
 /* Performing LPM-based lookups. 8< */
@@ -145,6 +147,94 @@ lpm_get_dst_port_with_ipv4(const struct lcore_conf *qconf, struct rte_mbuf *pkt,
 #include "l3fwd_lpm.h"
 #endif
 
+#ifndef PKTS_FROM_FILE
+/* main processing loop */
+int
+lpm_main_loop(__rte_unused void *dummy)
+{
+	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+	unsigned lcore_id;
+	uint64_t prev_tsc, diff_tsc, cur_tsc;
+	int i, nb_rx;
+	uint16_t portid, queueid;
+	struct lcore_conf *qconf;
+	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) /
+		US_PER_S * BURST_TX_DRAIN_US;
+
+	lcore_id = rte_lcore_id();
+	qconf = &lcore_conf[lcore_id];
+
+	const uint16_t n_rx_q = qconf->n_rx_queue;
+	const uint16_t n_tx_p = qconf->n_tx_port;
+	if (n_rx_q == 0) {
+		RTE_LOG(INFO, L3FWD, "lcore %u has nothing to do\n", lcore_id);
+		return 0;
+	}
+
+	RTE_LOG(INFO, L3FWD, "entering main loop on lcore %u\n", lcore_id);
+
+	for (i = 0; i < n_rx_q; i++) {
+
+		portid = qconf->rx_queue_list[i].port_id;
+		queueid = qconf->rx_queue_list[i].queue_id;
+		RTE_LOG(INFO, L3FWD,
+			" -- lcoreid=%u portid=%u rxqueueid=%" PRIu16 "\n",
+			lcore_id, portid, queueid);
+	}
+
+	cur_tsc = rte_rdtsc();
+	prev_tsc = cur_tsc;
+
+	while (!force_quit) {
+
+		/*
+		 * TX burst queue drain
+		 */
+		diff_tsc = cur_tsc - prev_tsc;
+		if (unlikely(diff_tsc > drain_tsc)) {
+
+			for (i = 0; i < n_tx_p; ++i) {
+				portid = qconf->tx_port_id[i];
+				if (qconf->tx_mbufs[portid].len == 0)
+					continue;
+				send_burst(qconf,
+					qconf->tx_mbufs[portid].len,
+					portid);
+				qconf->tx_mbufs[portid].len = 0;
+			}
+
+			prev_tsc = cur_tsc;
+		}
+
+		/*
+		 * Read packet from RX queues
+		 */
+		for (i = 0; i < n_rx_q; ++i) {
+			portid = qconf->rx_queue_list[i].port_id;
+			queueid = qconf->rx_queue_list[i].queue_id;
+			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
+				rx_burst_size);
+			if (nb_rx == 0)
+				continue;
+
+#if defined RTE_ARCH_X86 || defined __ARM_NEON \
+			 || defined RTE_ARCH_PPC_64
+			l3fwd_lpm_send_packets(nb_rx, pkts_burst,
+						portid, qconf);
+#else
+			l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
+							portid, qconf);
+#endif /* X86 */
+		}
+
+		cur_tsc = rte_rdtsc();
+	}
+
+	return 0;
+}
+
+#else
+
 /* main processing loop */
 int
 lpm_main_loop(__rte_unused void *dummy)
@@ -189,36 +279,6 @@ lpm_main_loop(__rte_unused void *dummy)
 		 * TX burst queue drain
 		 */
 		i = 0;
-		/*
-		diff_tsc = cur_tsc - prev_tsc;
-		if (unlikely(diff_tsc > drain_tsc)) {
-
-			for (i = 0; i < n_tx_p; ++i) {
-				portid = qconf->tx_port_id[i];
-				if (qconf->tx_mbufs[portid].len == 0)
-					continue;
-				send_burst(qconf,
-					qconf->tx_mbufs[portid].len,
-					portid);
-				qconf->tx_mbufs[portid].len = 0;
-			}
-
-			prev_tsc = cur_tsc;
-		}
-		*/
-		/*
-		 * Read packet from RX queues
-		 */
-		/* MODIFICATION STARTS */
-#ifndef PKTS_FROM_FILE
-		 for (i = 0; i < n_rx_q; ++i) {
-		 	portid = qconf->rx_queue_list[i].port_id;
-		 	queueid = qconf->rx_queue_list[i].queue_id;
-		 	nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
-		 		rx_burst_size);
-		 	if (nb_rx == 0)
-		 		continue;
-#else
 		if (send_flag == 0) {
 			int burst_count = 0;
 			portid = qconf->rx_queue_list[0].port_id;
@@ -297,7 +357,6 @@ lpm_main_loop(__rte_unused void *dummy)
 				if (burst_count == DEFAULT_PKT_BURST) {
 					nb_rx = burst_count;
 
-#endif
 #if defined RTE_ARCH_X86 || defined __ARM_NEON \
 					|| defined RTE_ARCH_PPC_64
 					l3fwd_lpm_send_packets(nb_rx, pkts_burst,
@@ -306,7 +365,6 @@ lpm_main_loop(__rte_unused void *dummy)
 					l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
 						portid, qconf);
 #endif /* X86 */
-#ifdef PKTS_FROM_FILE
 					burst_count = 0;
 				}
 			} /* end block loop */
@@ -325,13 +383,13 @@ lpm_main_loop(__rte_unused void *dummy)
 			}
 
 			send_flag = 1;
-#endif
 		}
 		cur_tsc = rte_rdtsc();
 	}
 
 	return 0;
 }
+#endif
 
 #ifdef RTE_LIB_EVENTDEV
 static __rte_always_inline uint16_t
