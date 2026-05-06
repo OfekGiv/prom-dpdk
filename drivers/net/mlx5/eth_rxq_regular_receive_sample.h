@@ -33,11 +33,13 @@ uint16_t eth_rxq_poll(struct eth_rxq_sample_objects *handle,
 void eth_rxq_close(struct eth_rxq_sample_objects *handle);
 
 /*
- * Install a root pipe steering ESP packets into one of two RXQs based on the
- * LSB of the ESP sequence number. handles[0] receives SN-LSB==0, handles[1]
- * receives SN-LSB==1. Both handles must already be opened.
+ * Install a root pipe steering ESP packets into one of `nb_queues` RXQs based
+ * on (esp_sn & (nb_queues - 1)). handles[i] receives packets where
+ * (esp_sn % nb_queues) == i. nb_queues must be a power of two and all
+ * handles[0..nb_queues-1] must already be opened.
  */
-doca_error_t eth_rxq_install_lsb_demux_flow(struct eth_rxq_sample_objects **handles);
+doca_error_t eth_rxq_install_lsb_demux_flow(struct eth_rxq_sample_objects **handles,
+					    uint16_t nb_queues);
 
 void eth_rxq_uninstall_demux_flow(void);
 

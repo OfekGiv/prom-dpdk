@@ -39,9 +39,10 @@ static struct doca_dev *doca_devs[RTE_MAX_ETHPORTS];
 
 static void mlx5_traffic_disable_legacy(struct rte_eth_dev *dev);
 
-/* PoC: two DOCA RXQ handles, demuxed by ESP SN LSB. */
-#define MLX5_DOCA_RXQ_NUM 2
-static struct eth_rxq_sample_objects *g_doca_rxq_handle[MLX5_DOCA_RXQ_NUM];
+/* DOCA RXQ handles, demuxed by ESP SN modulo group size (mu_sq_log_grp_size). */
+#define MLX5_DOCA_RXQ_MAX 256
+static struct eth_rxq_sample_objects *g_doca_rxq_handle[MLX5_DOCA_RXQ_MAX];
+static uint16_t g_doca_nb_rxqs;
 
 static uint16_t
 mlx5_doca_rx_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
@@ -52,7 +53,7 @@ mlx5_doca_rx_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 	if (unlikely(rxq_data == NULL))
 		return 0;
 	idx = rxq_data->idx;
-	if (idx >= MLX5_DOCA_RXQ_NUM || g_doca_rxq_handle[idx] == NULL)
+	if (idx >= g_doca_nb_rxqs || g_doca_rxq_handle[idx] == NULL)
 		return 0;
 	return eth_rxq_poll(g_doca_rxq_handle[idx], rx_pkts, nb_pkts);
 }
@@ -2033,50 +2034,60 @@ continue_dev_start:
 		goto txq_stop;
 	}
 	printf("nb_rx_queues: %u\n", dev->data->nb_rx_queues);
-	if (g_doca_rxq_handle[0] == NULL && dev->data->nb_rx_queues >= MLX5_DOCA_RXQ_NUM) {
-		bool open_ok = true;
+	{
+		uint8_t log_grp = dev->data->mu_sq_log_grp_size;
+		uint16_t want = (uint16_t)1u << log_grp;
 
-		for (uint16_t i = 0; i < MLX5_DOCA_RXQ_NUM; i++) {
-			struct mlx5_rxq_data *rxqi = dev->data->rx_queues[i];
-			doca_error_t drc;
+		if (want > MLX5_DOCA_RXQ_MAX) {
+			DRV_LOG(ERR, "port %u mu_sq_log_grp_size=%u exceeds MLX5_DOCA_RXQ_MAX=%u",
+				dev->data->port_id, log_grp, MLX5_DOCA_RXQ_MAX);
+		} else if (g_doca_nb_rxqs == 0 && dev->data->nb_rx_queues >= want) {
+			bool open_ok = true;
 
-			if (rxqi == NULL || rxqi->mp == NULL) {
-				DRV_LOG(WARNING, "port %u rxq[%u] not ready; skipping DOCA RXQ open",
-					dev->data->port_id, i);
-				open_ok = false;
-				break;
-			}
-			drc = eth_rxq_open(&g_doca_rxq_handle[i], "mlx5_1", true, i, rxqi->mp);
-			if (drc != DOCA_SUCCESS) {
-				DRV_LOG(ERR, "port %u eth_rxq_open[%u] failed: %s",
-					dev->data->port_id, i, doca_error_get_descr(drc));
-				g_doca_rxq_handle[i] = NULL;
-				open_ok = false;
-				break;
-			}
-		}
+			for (uint16_t i = 0; i < want; i++) {
+				struct mlx5_rxq_data *rxqi = dev->data->rx_queues[i];
+				doca_error_t drc;
 
-		if (open_ok) {
-			doca_error_t drc = eth_rxq_install_lsb_demux_flow(g_doca_rxq_handle);
-
-			if (drc != DOCA_SUCCESS) {
-				DRV_LOG(ERR, "port %u eth_rxq_install_lsb_demux_flow failed: %s",
-					dev->data->port_id, doca_error_get_descr(drc));
-				open_ok = false;
-			}
-		}
-
-		if (!open_ok) {
-			for (uint16_t i = 0; i < MLX5_DOCA_RXQ_NUM; i++) {
-				if (g_doca_rxq_handle[i] != NULL) {
-					eth_rxq_close(g_doca_rxq_handle[i]);
+				if (rxqi == NULL || rxqi->mp == NULL) {
+					DRV_LOG(WARNING, "port %u rxq[%u] not ready; skipping DOCA RXQ open",
+						dev->data->port_id, i);
+					open_ok = false;
+					break;
+				}
+				drc = eth_rxq_open(&g_doca_rxq_handle[i], "mlx5_1", true, i, rxqi->mp);
+				if (drc != DOCA_SUCCESS) {
+					DRV_LOG(ERR, "port %u eth_rxq_open[%u] failed: %s",
+						dev->data->port_id, i, doca_error_get_descr(drc));
 					g_doca_rxq_handle[i] = NULL;
+					open_ok = false;
+					break;
 				}
 			}
+
+			if (open_ok) {
+				doca_error_t drc = eth_rxq_install_lsb_demux_flow(g_doca_rxq_handle, want);
+
+				if (drc != DOCA_SUCCESS) {
+					DRV_LOG(ERR, "port %u eth_rxq_install_lsb_demux_flow failed: %s",
+						dev->data->port_id, doca_error_get_descr(drc));
+					open_ok = false;
+				}
+			}
+
+			if (open_ok) {
+				g_doca_nb_rxqs = want;
+			} else {
+				for (uint16_t i = 0; i < want; i++) {
+					if (g_doca_rxq_handle[i] != NULL) {
+						eth_rxq_close(g_doca_rxq_handle[i]);
+						g_doca_rxq_handle[i] = NULL;
+					}
+				}
+			}
+		} else if (dev->data->nb_rx_queues < want) {
+			DRV_LOG(WARNING, "port %u has %u rx queues; need >= %u for DOCA SN demux (log_grp=%u)",
+				dev->data->port_id, dev->data->nb_rx_queues, want, log_grp);
 		}
-	} else if (dev->data->nb_rx_queues < MLX5_DOCA_RXQ_NUM) {
-		DRV_LOG(WARNING, "port %u has %u rx queues; need >= %u for DOCA LSB demux",
-			dev->data->port_id, dev->data->nb_rx_queues, MLX5_DOCA_RXQ_NUM);
 	}
 
 	/*
@@ -2159,7 +2170,7 @@ continue_dev_start:
 	rte_wmb();
 	dev->tx_pkt_burst = mlx5_select_tx_function(dev);
 	dev->rx_pkt_burst = mlx5_select_rx_function(dev);
-	if (g_doca_rxq_handle[0] != NULL)
+	if (g_doca_nb_rxqs > 0)
 		dev->rx_pkt_burst = mlx5_doca_rx_burst;
 	/* Enable datapath on secondary process. */
 	mlx5_mp_os_req_start_rxtx(dev);
@@ -2300,14 +2311,15 @@ continue_dev_stop:
 	dev->data->dev_started = 0;
 	/* Prevent crashes when queues are still in use. */
 	dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
-	if (g_doca_rxq_handle[0] != NULL) {
+	if (g_doca_nb_rxqs > 0) {
 		eth_rxq_uninstall_demux_flow();
-		for (uint16_t i = 0; i < MLX5_DOCA_RXQ_NUM; i++) {
+		for (uint16_t i = 0; i < g_doca_nb_rxqs; i++) {
 			if (g_doca_rxq_handle[i] != NULL) {
 				eth_rxq_close(g_doca_rxq_handle[i]);
 				g_doca_rxq_handle[i] = NULL;
 			}
 		}
+		g_doca_nb_rxqs = 0;
 	}
 	dev->tx_pkt_burst = rte_eth_pkt_burst_dummy;
 	rte_wmb();

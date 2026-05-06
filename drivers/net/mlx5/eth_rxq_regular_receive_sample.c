@@ -61,11 +61,13 @@ DOCA_LOG_REGISTER(ETH_RXQ_REGULAR_RECEIVE);
 static volatile sig_atomic_t g_stop_capture = 0;
 
 /* Shared flow state for the LSB-demux pipes, owned by eth_rxq_install_lsb_demux_flow. */
+#define MLX5_DOCA_RXQ_MAX 256
 static struct eth_flow_common_resources g_demux_flow_resources;
 static struct doca_flow_pipe *g_demux_root_pipe;
 static struct doca_flow_pipe_entry *g_demux_root_entry;
 static struct doca_flow_pipe *g_demux_pipe;
-static struct doca_flow_pipe_entry *g_demux_entries[2];
+static struct doca_flow_pipe_entry *g_demux_entries[MLX5_DOCA_RXQ_MAX];
+static uint16_t g_demux_nb_entries;
 static bool g_demux_flow_inited;
 
 static void handle_stop_signal(int signo)
@@ -1009,11 +1011,18 @@ destroy_cfg:
  * Root pipe with two entries; each entry exact-matches outer ESP and masks
  * tun.esp_sn down to the LSB, forwarding to its RXQ.
  */
-static doca_error_t build_lsb_demux_single_pipe(struct eth_rxq_sample_objects **handles)
+/*
+ * Build the demux pipe with `nb_queues` entries. Each entry i matches packets
+ * where (esp_sn % nb_queues) == i and forwards to handles[i]. nb_queues must be
+ * a power of two so the modulo collapses to a bitmask of nb_queues - 1.
+ */
+static doca_error_t build_lsb_demux_single_pipe(struct eth_rxq_sample_objects **handles,
+						uint16_t nb_queues)
 {
 	doca_error_t status;
 	struct doca_flow_pipe_cfg *pipe_cfg = NULL;
 	struct doca_flow_fwd fwd_miss = {.type = DOCA_FLOW_FWD_DROP};
+	uint32_t sn_mask = (uint32_t)nb_queues - 1u;
 
 	status = doca_flow_pipe_cfg_create(&pipe_cfg, g_demux_flow_resources.df_port);
 	if (status != DOCA_SUCCESS)
@@ -1028,7 +1037,7 @@ static doca_error_t build_lsb_demux_single_pipe(struct eth_rxq_sample_objects **
 		goto destroy_cfg;
 	doca_flow_pipe_cfg_destroy(pipe_cfg);
 
-	for (uint16_t i = 0; i < 2; i++) {
+	for (uint16_t i = 0; i < nb_queues; i++) {
 		struct doca_flow_match entry_match = {0};
 		struct doca_flow_match entry_mask = {0};
 		struct doca_flow_fwd entry_fwd = {0};
@@ -1041,7 +1050,7 @@ static doca_error_t build_lsb_demux_single_pipe(struct eth_rxq_sample_objects **
 		entry_mask.parser_meta.outer_l3_type = (uint8_t)0xff;
 		entry_mask.parser_meta.outer_l4_type = (uint8_t)0xff;
 		entry_mask.tun.type = (uint32_t)0xffffffff;
-		entry_mask.tun.esp_sn = DOCA_HTOBE32(1u);
+		entry_mask.tun.esp_sn = DOCA_HTOBE32(sn_mask);
 
 		entry_fwd.type = DOCA_FLOW_FWD_RSS;
 		entry_fwd.rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED;
@@ -1070,6 +1079,7 @@ static doca_error_t build_lsb_demux_single_pipe(struct eth_rxq_sample_objects **
 			return status;
 		}
 	}
+	g_demux_nb_entries = nb_queues;
 	return DOCA_SUCCESS;
 
 destroy_cfg:
@@ -1085,12 +1095,21 @@ destroy_cfg:
  * Original two-stage implementation kept below in build_demux_*_pipe — re-enable
  * once the root-only path is confirmed working.
  */
-doca_error_t eth_rxq_install_lsb_demux_flow(struct eth_rxq_sample_objects **handles)
+doca_error_t eth_rxq_install_lsb_demux_flow(struct eth_rxq_sample_objects **handles,
+					    uint16_t nb_queues)
 {
 	doca_error_t status;
 
-	if (handles == NULL || handles[0] == NULL || handles[1] == NULL)
+	if (handles == NULL || nb_queues == 0 || nb_queues > MLX5_DOCA_RXQ_MAX)
 		return DOCA_ERROR_INVALID_VALUE;
+	if ((nb_queues & (nb_queues - 1)) != 0) {
+		DOCA_LOG_ERR("nb_queues=%u is not a power of two; LSB demux requires it", nb_queues);
+		return DOCA_ERROR_INVALID_VALUE;
+	}
+	for (uint16_t i = 0; i < nb_queues; i++) {
+		if (handles[i] == NULL)
+			return DOCA_ERROR_INVALID_VALUE;
+	}
 	if (g_demux_flow_inited)
 		return DOCA_ERROR_IN_USE;
 
@@ -1105,7 +1124,7 @@ doca_error_t eth_rxq_install_lsb_demux_flow(struct eth_rxq_sample_objects **hand
 	if (status != DOCA_SUCCESS)
 		goto cleanup_flow;
 
-	status = build_lsb_demux_single_pipe(handles);
+	status = build_lsb_demux_single_pipe(handles, nb_queues);
 	if (status != DOCA_SUCCESS)
 		goto destroy_port;
 
@@ -1116,8 +1135,8 @@ doca_error_t eth_rxq_install_lsb_demux_flow(struct eth_rxq_sample_objects **hand
 	}
 
 	g_demux_flow_inited = true;
-	DOCA_LOG_INFO("Installed single-pipe ESP SN LSB demux (rxq %u, %u)",
-		      handles[0]->rxq_queue_id, handles[1]->rxq_queue_id);
+	DOCA_LOG_INFO("Installed ESP SN demux pipe over %u rxqs (mask 0x%x)",
+		      nb_queues, (unsigned)(nb_queues - 1));
 	return DOCA_SUCCESS;
 
 destroy_root:
@@ -1146,8 +1165,9 @@ void eth_rxq_uninstall_demux_flow(void)
 		(void)eth_flow_common_destroy_flow_port(&g_demux_flow_resources);
 	eth_flow_common_cleanup_flow();
 	g_demux_root_entry = NULL;
-	g_demux_entries[0] = NULL;
-	g_demux_entries[1] = NULL;
+	for (uint16_t i = 0; i < g_demux_nb_entries; i++)
+		g_demux_entries[i] = NULL;
+	g_demux_nb_entries = 0;
 	g_demux_flow_inited = false;
 }
 
