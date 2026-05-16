@@ -27,7 +27,6 @@
 #include <unistd.h>
 #include <signal.h>
 
-#include <doca_bitfield.h>
 #include <doca_flow.h>
 #include <doca_buf.h>
 #include <doca_buf_inventory.h>
@@ -36,18 +35,15 @@
 #include <doca_eth_rxq_cpu_data_path.h>
 #include <doca_error.h>
 #include <doca_log.h>
+#include <doca_dpdk.h>
 
 #include "common.h"
 #include "eth_common.h"
 #include "eth_flow_common.h"
-#include "eth_rxq_regular_receive_sample.h"
 
 #include <rte_byteorder.h>
 #include <rte_ether.h>
 #include <rte_ip.h>
-#include <rte_mbuf.h>
-#include <rte_memcpy.h>
-#include <rte_mempool.h>
 
 DOCA_LOG_REGISTER(ETH_RXQ_REGULAR_RECEIVE);
 
@@ -59,22 +55,9 @@ DOCA_LOG_REGISTER(ETH_RXQ_REGULAR_RECEIVE);
 #define RECV_TASK_USER_DATA 0x43210 /* User data for receive task */
 
 static volatile sig_atomic_t g_stop_capture = 0;
-
-/* Shared flow state for the LSB-demux pipes, owned by eth_rxq_install_lsb_demux_flow. */
-#define MLX5_DOCA_RXQ_MAX 256
-static struct eth_flow_common_resources g_demux_flow_resources;
-static struct doca_flow_pipe *g_demux_root_pipe;
-static struct doca_flow_pipe_entry *g_demux_root_entry;
-static struct doca_flow_pipe *g_demux_pipe;
-static struct doca_flow_pipe_entry *g_demux_entries[MLX5_DOCA_RXQ_MAX];
-static uint16_t g_demux_nb_entries;
-static bool g_demux_flow_inited;
-
-static void handle_stop_signal(int signo)
-{
-    (void)signo;
-    g_stop_capture = 1;
-}
+static struct eth_flow_common_resources g_flow_resources[RTE_MAX_ETHPORTS];
+static bool g_flow_port_active[RTE_MAX_ETHPORTS];
+static uint16_t g_flow_ports_count;
 
 struct eth_rxq_sample_objects {
 	struct eth_core_resources core_resources;	 /* A struct to hold ETH core resources */
@@ -85,10 +68,6 @@ struct eth_rxq_sample_objects {
 	uint32_t inflight_tasks;			 /* Inflight tasks count */
 	uint16_t rxq_queue_id;				 /* DOCA ETH RXQ's queue ID */
 	bool timestamp_enable;				 /* timestamp enable */
-	struct rte_mempool *mp;				 /* Mempool for delivering received pkts to DPDK */
-	struct rte_mbuf *pending[MAX_BURST_SIZE];	 /* Mbufs filled by callback, drained by poll */
-	uint16_t pending_count;
-	uint16_t *rss_queues;				 /* Owned by handle when opened via eth_rxq_open */
 };
 
 static void print_esp_sn(struct doca_buf *pkt)
@@ -157,7 +136,7 @@ static void task_recv_common_cb(struct doca_eth_rxq_task_recv *task_recv,
 
 	state = ctx_user_data.ptr;
 	state->inflight_tasks--;
-	(void)task_user_data;
+	DOCA_LOG_INFO("Receive task user data is 0x%lx", task_user_data.u64);
 
 	status = doca_eth_rxq_task_recv_get_pkt(task_recv, &pkt);
 	if (status != DOCA_SUCCESS) {
@@ -170,28 +149,7 @@ static void task_recv_common_cb(struct doca_eth_rxq_task_recv *task_recv,
 
 	if (task_status != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to receive a packet, err: %s", doca_error_get_name(task_status));
-	} else if (state->mp != NULL) {
-		void *pkt_data = NULL;
-		size_t pkt_len = 0;
-
-		if (doca_buf_get_data(pkt, &pkt_data) == DOCA_SUCCESS &&
-		    doca_buf_get_data_len(pkt, &pkt_len) == DOCA_SUCCESS &&
-		    pkt_len > 0 && state->pending_count < MAX_BURST_SIZE) {
-			struct rte_mbuf *m = rte_pktmbuf_alloc(state->mp);
-
-			if (m != NULL) {
-				char *dst = rte_pktmbuf_append(m, (uint16_t)pkt_len);
-
-				if (dst != NULL) {
-					rte_memcpy(dst, pkt_data, pkt_len);
-					state->pending[state->pending_count++] = m;
-				} else {
-					rte_pktmbuf_free(m);
-				}
-			}
-		}
 	} else {
-		DOCA_LOG_INFO("Receive task user data is 0x%lx", task_user_data.u64);
 		status = doca_eth_rxq_task_recv_get_metadata_array(task_recv, &metadata_array);
 		if (status != DOCA_SUCCESS)
 			DOCA_LOG_ERR("Failed to get metadata_array, err: %s", doca_error_get_name(status));
@@ -403,11 +361,12 @@ static doca_error_t create_eth_rxq_ctx(struct eth_rxq_sample_objects *state)
 		goto destroy_eth_rxq;
 	}
 
-	status = doca_eth_rxq_apply_queue_id(state->eth_rxq, state->rxq_queue_id);
+	status = doca_eth_rxq_apply_queue_id(state->eth_rxq, 0);
 	if (status != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to apply queue ID of RXQ, err: %s", doca_error_get_name(status));
 		goto stop_ctx;
 	}
+	state->rxq_queue_id = 0;
 
 	return DOCA_SUCCESS;
 stop_ctx:
@@ -603,6 +562,163 @@ static doca_error_t retrieve_rxq_recv_tasks(struct eth_rxq_sample_objects *state
     return DOCA_SUCCESS;
 }
 
+doca_error_t rxq_doca_start(uint16_t dpdk_port_id, uint16_t nb_queues,
+			   struct doca_dev *dev, bool bridge_mapped)
+{
+	doca_error_t result = DOCA_SUCCESS;
+	struct doca_log_backend *sdk_log;
+	doca_error_t status = DOCA_SUCCESS;
+	struct eth_flow_common_config flow_cfg = {};
+	bool flow_initialized = false;
+	struct eth_flow_common_resources *resources;
+
+	uint16_t *rss_queues = NULL;
+	uint16_t port_id = dpdk_port_id;
+
+	if (port_id >= RTE_MAX_ETHPORTS)
+		return DOCA_ERROR_INVALID_VALUE;
+
+	resources = &g_flow_resources[port_id];
+	if (g_flow_port_active[port_id])
+		return DOCA_SUCCESS;
+
+	/* Register a logger backend */
+	result = doca_log_backend_create_standard();
+	if (result != DOCA_SUCCESS)
+		goto rxq_cleanup;
+
+	/* Register a logger backend for internal SDK errors and warnings */
+	result = doca_log_backend_create_with_file_sdk(stderr, &sdk_log);
+	if (result != DOCA_SUCCESS)
+		goto rxq_cleanup;
+	result = doca_log_backend_set_sdk_level(sdk_log, DOCA_LOG_LEVEL_INFO);
+	if (result != DOCA_SUCCESS)
+		goto rxq_cleanup;
+
+	if (dev == NULL) {
+		DOCA_LOG_ERR("Invalid DOCA device for DPDK port %u", dpdk_port_id);
+		status = DOCA_ERROR_INVALID_VALUE;
+		goto rxq_cleanup;
+	}
+	if (!bridge_mapped) {
+		DOCA_LOG_WARN("DPDK port %u is not associated with the DOCA-DPDK bridge; skipping DOCA RSS forwarding setup",
+			      dpdk_port_id);
+		return DOCA_ERROR_NOT_SUPPORTED;
+	}
+
+	status = eth_flow_common_init_flow(nb_queues);
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to init flow, err: %s", doca_error_get_name(status));
+		goto rxq_cleanup;
+	}
+	flow_initialized = true;
+	flow_cfg.dev = dev;
+
+	status = eth_flow_common_create_flow_port(flow_cfg.dev, dpdk_port_id, resources);
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to create flow port, err: %s", doca_error_get_name(status));
+		goto rxq_cleanup;
+	}
+
+	if (nb_queues == 0) {
+		DOCA_LOG_ERR("Invalid nb_queues=0");
+		status = DOCA_ERROR_INVALID_VALUE;
+		goto rxq_cleanup;
+	}
+
+	rss_queues = calloc(nb_queues, sizeof(*rss_queues));
+	if (!rss_queues) {
+		DOCA_LOG_ERR("Failed to allocate memory for RSS queues");
+		status = DOCA_ERROR_NO_MEMORY;
+		goto rxq_cleanup;
+	}
+	for (uint16_t i = 0; i < nb_queues; i++)
+		rss_queues[i] = i;
+
+	flow_cfg.rxq_queue_ids = rss_queues;
+	flow_cfg.nb_queues = nb_queues;
+
+	status = eth_flow_common_create_flow_pipe(&flow_cfg, resources);
+	if (status == DOCA_ERROR_NOT_FOUND) {
+		/* Some bridge setups expose logical RXQ IDs starting at 1. Retry once. */
+		for (uint16_t i = 0; i < nb_queues; i++)
+			rss_queues[i] = i + 1;
+		DOCA_LOG_INFO("Retrying flow pipe creation with RSS queue IDs base=1");
+		status = eth_flow_common_create_flow_pipe(&flow_cfg, resources);
+	}
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to create flow pipe, err: %s", doca_error_get_name(status));
+		goto rxq_cleanup;
+	}
+
+	g_flow_port_active[port_id] = true;
+	g_flow_ports_count++;
+/*
+	status = create_eth_rxq_packet_buffer(&state);
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to create packer buffer, err: %s", doca_error_get_name(status));
+		goto rxq_cleanup;
+	}
+
+	status = create_eth_rxq_tasks(&state);
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to create tasks, err: %s", doca_error_get_name(status));
+		goto destroy_packet_buffers;
+	}
+
+	status = submit_eth_rxq_tasks(&state);
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to submit tasks, err: %s", doca_error_get_name(status));
+		goto destroy_rxq_tasks;
+	}
+
+	status = retrieve_rxq_recv_tasks(&state);
+	if (status != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Receive loop failed, err: %s", doca_error_get_name(status));
+		goto rxq_cleanup;
+	}
+*/
+	return DOCA_SUCCESS;
+
+//destroy_rxq_tasks:
+//	destroy_eth_rxq_tasks(&state);
+//destroy_packet_buffers:
+//	clean_status = destroy_eth_rxq_packet_buffers(&state);
+//	if (clean_status != DOCA_SUCCESS)
+//		return status;
+rxq_cleanup:
+	DOCA_LOG_INFO("Finished");
+	if (resources->root_pipe != NULL)
+		eth_flow_common_destroy_flow_pipe(resources);
+	if (resources->df_port != NULL)
+		(void)eth_flow_common_destroy_flow_port(resources);
+	if (flow_initialized)
+		eth_flow_common_cleanup_flow();
+	free(rss_queues);
+
+	return status;
+}
+
+void rxq_doca_stop(uint16_t dpdk_port_id)
+{
+	struct eth_flow_common_resources *resources;
+
+	if (dpdk_port_id >= RTE_MAX_ETHPORTS)
+		return;
+	if (!g_flow_port_active[dpdk_port_id])
+		return;
+
+	resources = &g_flow_resources[dpdk_port_id];
+	eth_flow_common_destroy_flow_pipe(resources);
+	(void)eth_flow_common_destroy_flow_port(resources);
+	g_flow_port_active[dpdk_port_id] = false;
+	if (g_flow_ports_count > 0)
+		g_flow_ports_count--;
+	if (g_flow_ports_count == 0)
+		eth_flow_common_cleanup_flow();
+}
+
+
 /*
  * Run ETH RXQ regular mode receive
  *
@@ -610,6 +726,7 @@ static doca_error_t retrieve_rxq_recv_tasks(struct eth_rxq_sample_objects *state
  * @timestamp_enable [in]: timestamp enable
  * @return: DOCA_SUCCESS on success, DOCA_ERROR otherwise
  */
+/*
 doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_enable, uint16_t nb_queues)
 {
 	doca_error_t result = DOCA_SUCCESS;
@@ -626,15 +743,14 @@ doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_ena
 	signal(SIGINT, handle_stop_signal);
 	signal(SIGTERM, handle_stop_signal);
 
-	/* Register a logger backend */
 	result = doca_log_backend_create_standard();
 	if (result != DOCA_SUCCESS)
 		goto rxq_cleanup;
 
-	/* Register a logger backend for internal SDK errors and warnings */
 	result = doca_log_backend_create_with_file_sdk(stderr, &sdk_log);
 	if (result != DOCA_SUCCESS)
 		goto rxq_cleanup;
+
 	result = doca_log_backend_set_sdk_level(sdk_log, DOCA_LOG_LEVEL_INFO);
 	if (result != DOCA_SUCCESS)
 		goto rxq_cleanup;
@@ -651,7 +767,7 @@ doca_error_t eth_rxq_regular_receive(const char *ib_dev_name, bool timestamp_ena
 		goto rxq_cleanup;
 	}
 
-	status = eth_flow_common_init_flow();
+	status = eth_flow_common_init_flow(nb_queues);
 	if (status != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to init flow, err: %s", doca_error_get_name(status));
 		goto rxq_cleanup;
@@ -734,440 +850,4 @@ rxq_cleanup:
 
 	return status;
 }
-
-/*
- * Non-blocking init for use as a DPDK Rx burst backend.
- * Creates one DOCA ETH RXQ context bound to flow queue id `queue_idx`.
- * Caller is responsible for installing flow steering separately
- * (e.g. via eth_rxq_install_lsb_demux_flow once both handles are open).
- */
-doca_error_t eth_rxq_open(struct eth_rxq_sample_objects **out_handle,
-			  const char *ib_dev_name,
-			  bool timestamp_enable,
-			  uint16_t queue_idx,
-			  struct rte_mempool *mp)
-{
-	struct eth_rxq_sample_objects *state;
-	struct doca_log_backend *sdk_log;
-	struct eth_core_config cfg;
-	doca_error_t status;
-
-	if (out_handle == NULL || mp == NULL)
-		return DOCA_ERROR_INVALID_VALUE;
-
-	state = calloc(1, sizeof(*state));
-	if (state == NULL)
-		return DOCA_ERROR_NO_MEMORY;
-
-	state->timestamp_enable = timestamp_enable;
-	state->mp = mp;
-	state->rxq_queue_id = queue_idx;
-
-	memset(&cfg, 0, sizeof(cfg));
-	cfg.mmap_size = MAX_PKT_SIZE * BUFS_NUM;
-	cfg.inventory_num_elements = BUFS_NUM;
-	cfg.check_device = check_device;
-	cfg.ibdev_name = ib_dev_name;
-
-	/* Best-effort log backend init; ignore "already exists" failures. */
-	(void)doca_log_backend_create_standard();
-	if (doca_log_backend_create_with_file_sdk(stderr, &sdk_log) == DOCA_SUCCESS)
-		(void)doca_log_backend_set_sdk_level(sdk_log, DOCA_LOG_LEVEL_INFO);
-
-	status = allocate_eth_core_resources(&cfg, &state->core_resources);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed allocate core resources, err: %s", doca_error_get_name(status));
-		goto fail;
-	}
-
-	status = create_eth_rxq_ctx(state);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to create/start ETH RXQ context, err: %s", doca_error_get_name(status));
-		goto fail;
-	}
-
-	status = create_eth_rxq_packet_buffer(state);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to create packet buffer, err: %s", doca_error_get_name(status));
-		goto fail;
-	}
-
-	status = create_eth_rxq_tasks(state);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to create receive task, err: %s", doca_error_get_name(status));
-		(void)destroy_eth_rxq_packet_buffers(state);
-		goto fail;
-	}
-
-	status = submit_eth_rxq_tasks(state);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to submit receive task, err: %s", doca_error_get_name(status));
-		destroy_eth_rxq_tasks(state);
-		(void)destroy_eth_rxq_packet_buffers(state);
-		goto fail;
-	}
-
-	*out_handle = state;
-	return DOCA_SUCCESS;
-
-fail:
-	eth_rxq_cleanup(state);
-	free(state->rss_queues);
-	free(state);
-	*out_handle = NULL;
-	return status;
-}
-
-/*
- * Drive doca_pe_progress() once, drain any callback-deposited mbufs, resubmit
- * a fresh receive task, and return packets to the caller. Designed to be the
- * implementation behind dev->rx_pkt_burst.
- */
-uint16_t eth_rxq_poll(struct eth_rxq_sample_objects *state,
-		      struct rte_mbuf **mbufs,
-		      uint16_t nb_pkts)
-{
-	uint16_t out;
-
-	if (state == NULL || nb_pkts == 0)
-		return 0;
-
-	(void)doca_pe_progress(state->core_resources.core_objs.pe);
-
-	if (state->inflight_tasks == 0) {
-		if (create_eth_rxq_packet_buffer(state) != DOCA_SUCCESS)
-			goto drain;
-		if (create_eth_rxq_tasks(state) != DOCA_SUCCESS) {
-			(void)destroy_eth_rxq_packet_buffers(state);
-			goto drain;
-		}
-		if (submit_eth_rxq_tasks(state) != DOCA_SUCCESS) {
-			destroy_eth_rxq_tasks(state);
-			(void)destroy_eth_rxq_packet_buffers(state);
-			goto drain;
-		}
-	}
-
-drain:
-	out = state->pending_count < nb_pkts ? state->pending_count : nb_pkts;
-	for (uint16_t i = 0; i < out; i++)
-		mbufs[i] = state->pending[i];
-
-	if (out < state->pending_count) {
-		uint16_t left = state->pending_count - out;
-
-		memmove(&state->pending[0], &state->pending[out],
-			left * sizeof(state->pending[0]));
-		state->pending_count = left;
-	} else {
-		state->pending_count = 0;
-	}
-
-	return out;
-}
-
-void eth_rxq_close(struct eth_rxq_sample_objects *state)
-{
-	struct timespec ts = {.tv_sec = 0, .tv_nsec = SLEEP_IN_NANOS};
-
-	if (state == NULL)
-		return;
-
-	while (state->inflight_tasks != 0) {
-		(void)doca_pe_progress(state->core_resources.core_objs.pe);
-		nanosleep(&ts, &ts);
-	}
-
-	for (uint16_t i = 0; i < state->pending_count; i++)
-		rte_pktmbuf_free(state->pending[i]);
-	state->pending_count = 0;
-
-	eth_rxq_cleanup(state);
-	free(state->rss_queues);
-	free(state);
-}
-
-/*
- * Build the child pipe: matches tun.esp_sn with mask htobe(1), two entries
- * forwarding to the two RXQs based on the LSB.
- */
-__attribute__((unused))
-static doca_error_t build_demux_child_pipe(struct eth_rxq_sample_objects **handles)
-{
-	doca_error_t status;
-	struct doca_flow_match match = {0};
-	struct doca_flow_match match_mask = {0};
-	struct doca_flow_actions actions = {0};
-	struct doca_flow_actions *actions_arr[1] = {&actions};
-	struct doca_flow_pipe_cfg *pipe_cfg = NULL;
-	struct doca_flow_fwd fwd_miss = {.type = DOCA_FLOW_FWD_DROP};
-	struct doca_flow_fwd fwd_default = {.type = DOCA_FLOW_FWD_DROP};
-
-	match.tun.type = DOCA_FLOW_TUN_ESP;
-	match.tun.esp_sn = 0;
-	match_mask.tun.esp_sn = DOCA_HTOBE32(1u);
-
-	status = doca_flow_pipe_cfg_create(&pipe_cfg, g_demux_flow_resources.df_port);
-	if (status != DOCA_SUCCESS)
-		return status;
-	if ((status = doca_flow_pipe_cfg_set_name(pipe_cfg, "ESP_SN_LSB_CHILD")) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_type(pipe_cfg, DOCA_FLOW_PIPE_BASIC)) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_is_root(pipe_cfg, false)) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_match(pipe_cfg, &match, &match_mask)) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_actions(pipe_cfg, actions_arr, NULL, NULL, 1)) != DOCA_SUCCESS)
-		goto destroy_cfg;
-
-	status = doca_flow_pipe_create(pipe_cfg, &fwd_default, &fwd_miss, &g_demux_pipe);
-	if (status != DOCA_SUCCESS)
-		goto destroy_cfg;
-	doca_flow_pipe_cfg_destroy(pipe_cfg);
-	pipe_cfg = NULL;
-
-	for (uint16_t i = 0; i < 2; i++) {
-		struct doca_flow_match entry_match = {0};
-		struct doca_flow_fwd entry_fwd = {0};
-
-		entry_match.tun.type = DOCA_FLOW_TUN_ESP;
-		entry_match.tun.esp_sn = DOCA_HTOBE32((uint32_t)i);
-
-		entry_fwd.type = DOCA_FLOW_FWD_RSS;
-		entry_fwd.rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED;
-		entry_fwd.rss.queues_array = &handles[1 - i]->rxq_queue_id;
-		entry_fwd.rss.nr_queues = 1;
-
-		status = doca_flow_pipe_basic_add_entry(0, g_demux_pipe, &entry_match, 0,
-							&actions, NULL, &entry_fwd, 0, NULL,
-							&g_demux_entries[i]);
-		if (status != DOCA_SUCCESS) {
-			DOCA_LOG_ERR("Failed to add demux child entry %u, err: %s",
-				     i, doca_error_get_name(status));
-			doca_flow_pipe_destroy(g_demux_pipe);
-			g_demux_pipe = NULL;
-			return status;
-		}
-	}
-
-	return DOCA_SUCCESS;
-
-destroy_cfg:
-	doca_flow_pipe_cfg_destroy(pipe_cfg);
-	return status;
-}
-
-/*
- * Build the root pipe: exact-matches outer ESP and forwards everything to the
- * already-created child pipe.
- */
-__attribute__((unused))
-static doca_error_t build_demux_root_pipe(struct eth_rxq_sample_objects **handles)
-{
-	doca_error_t status;
-	struct doca_flow_match match = {0};
-	struct doca_flow_actions actions = {0};
-	struct doca_flow_actions *actions_arr[1] = {&actions};
-	struct doca_flow_pipe_cfg *pipe_cfg = NULL;
-	struct doca_flow_fwd fwd_miss = {.type = DOCA_FLOW_FWD_DROP};
-	struct doca_flow_fwd fwd_to_child = {
-		.type = DOCA_FLOW_FWD_PIPE,
-		.next_pipe = g_demux_pipe,
-	};
-
-	(void)handles;
-
-	match.parser_meta.outer_l3_type = DOCA_FLOW_L3_META_IPV4;
-	match.parser_meta.outer_l4_type = DOCA_FLOW_L4_META_ESP;
-
-	status = doca_flow_pipe_cfg_create(&pipe_cfg, g_demux_flow_resources.df_port);
-	if (status != DOCA_SUCCESS)
-		return status;
-	if ((status = doca_flow_pipe_cfg_set_name(pipe_cfg, "ESP_SN_LSB_ROOT")) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_type(pipe_cfg, DOCA_FLOW_PIPE_BASIC)) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_is_root(pipe_cfg, true)) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_match(pipe_cfg, &match, NULL)) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_actions(pipe_cfg, actions_arr, NULL, NULL, 1)) != DOCA_SUCCESS)
-		goto destroy_cfg;
-
-	status = doca_flow_pipe_create(pipe_cfg, &fwd_to_child, &fwd_miss, &g_demux_root_pipe);
-	if (status != DOCA_SUCCESS)
-		goto destroy_cfg;
-	doca_flow_pipe_cfg_destroy(pipe_cfg);
-
-	status = doca_flow_pipe_basic_add_entry(0, g_demux_root_pipe, &match, 0, &actions,
-						NULL, NULL, 0, NULL, &g_demux_root_entry);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to add root entry, err: %s", doca_error_get_name(status));
-		doca_flow_pipe_destroy(g_demux_root_pipe);
-		g_demux_root_pipe = NULL;
-	}
-	return status;
-
-destroy_cfg:
-	doca_flow_pipe_cfg_destroy(pipe_cfg);
-	return status;
-}
-
-/*
- * Single-pipe LSB demux using PIPE_CONTROL (per-entry mask).
- * Root pipe with two entries; each entry exact-matches outer ESP and masks
- * tun.esp_sn down to the LSB, forwarding to its RXQ.
- */
-/*
- * Build the demux pipe with `nb_queues` entries. Each entry i matches packets
- * where (esp_sn % nb_queues) == i and forwards to handles[i]. nb_queues must be
- * a power of two so the modulo collapses to a bitmask of nb_queues - 1.
- */
-static doca_error_t build_lsb_demux_single_pipe(struct eth_rxq_sample_objects **handles,
-						uint16_t nb_queues)
-{
-	doca_error_t status;
-	struct doca_flow_pipe_cfg *pipe_cfg = NULL;
-	struct doca_flow_fwd fwd_miss = {.type = DOCA_FLOW_FWD_DROP};
-	uint32_t sn_mask = (uint32_t)nb_queues - 1u;
-
-	status = doca_flow_pipe_cfg_create(&pipe_cfg, g_demux_flow_resources.df_port);
-	if (status != DOCA_SUCCESS)
-		return status;
-	if ((status = doca_flow_pipe_cfg_set_name(pipe_cfg, "ESP_SN_LSB_DEMUX")) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_type(pipe_cfg, DOCA_FLOW_PIPE_CONTROL)) != DOCA_SUCCESS ||
-	    (status = doca_flow_pipe_cfg_set_is_root(pipe_cfg, true)) != DOCA_SUCCESS)
-		goto destroy_cfg;
-
-	status = doca_flow_pipe_create(pipe_cfg, NULL, &fwd_miss, &g_demux_root_pipe);
-	if (status != DOCA_SUCCESS)
-		goto destroy_cfg;
-	doca_flow_pipe_cfg_destroy(pipe_cfg);
-
-	for (uint16_t i = 0; i < nb_queues; i++) {
-		struct doca_flow_match entry_match = {0};
-		struct doca_flow_match entry_mask = {0};
-		struct doca_flow_fwd entry_fwd = {0};
-
-		entry_match.parser_meta.outer_l3_type = DOCA_FLOW_L3_META_IPV4;
-		entry_match.parser_meta.outer_l4_type = DOCA_FLOW_L4_META_ESP;
-		entry_match.tun.type = DOCA_FLOW_TUN_ESP;
-		entry_match.tun.esp_sn = DOCA_HTOBE32((uint32_t)i);
-
-		entry_mask.parser_meta.outer_l3_type = (uint8_t)0xff;
-		entry_mask.parser_meta.outer_l4_type = (uint8_t)0xff;
-		entry_mask.tun.type = (uint32_t)0xffffffff;
-		entry_mask.tun.esp_sn = DOCA_HTOBE32(sn_mask);
-
-		entry_fwd.type = DOCA_FLOW_FWD_RSS;
-		entry_fwd.rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED;
-		entry_fwd.rss.queues_array = &handles[i]->rxq_queue_id;
-		entry_fwd.rss.nr_queues = 1;
-		entry_fwd.rss.outer_flags = DOCA_FLOW_RSS_ESP;
-
-		status = doca_flow_pipe_control_add_entry(0,
-							  g_demux_root_pipe,
-							  &entry_match,
-							  &entry_mask,
-							  NULL, /* condition */
-							  NULL, /* actions */
-							  NULL, /* actions_mask */
-							  NULL, /* action_descs */
-							  NULL, /* monitor */
-							  0,    /* priority */
-							  &entry_fwd,
-							  NULL, /* usr_ctx */
-							  &g_demux_entries[i]);
-		if (status != DOCA_SUCCESS) {
-			DOCA_LOG_ERR("Failed to add control demux entry %u, err: %s",
-				     i, doca_error_get_name(status));
-			doca_flow_pipe_destroy(g_demux_root_pipe);
-			g_demux_root_pipe = NULL;
-			return status;
-		}
-	}
-	g_demux_nb_entries = nb_queues;
-	return DOCA_SUCCESS;
-
-destroy_cfg:
-	doca_flow_pipe_cfg_destroy(pipe_cfg);
-	return status;
-}
-
-/*
- * DIAGNOSTIC: install a single root pipe that fwds all ESP to RXQ 0. If WQEs
- * appear on q0, the root pipe is matching and we know the issue is in the
- * downstream demux. If no WQEs, traffic isn't even reaching our pipe.
- *
- * Original two-stage implementation kept below in build_demux_*_pipe — re-enable
- * once the root-only path is confirmed working.
- */
-doca_error_t eth_rxq_install_lsb_demux_flow(struct eth_rxq_sample_objects **handles,
-					    uint16_t nb_queues)
-{
-	doca_error_t status;
-
-	if (handles == NULL || nb_queues == 0 || nb_queues > MLX5_DOCA_RXQ_MAX)
-		return DOCA_ERROR_INVALID_VALUE;
-	if ((nb_queues & (nb_queues - 1)) != 0) {
-		DOCA_LOG_ERR("nb_queues=%u is not a power of two; LSB demux requires it", nb_queues);
-		return DOCA_ERROR_INVALID_VALUE;
-	}
-	for (uint16_t i = 0; i < nb_queues; i++) {
-		if (handles[i] == NULL)
-			return DOCA_ERROR_INVALID_VALUE;
-	}
-	if (g_demux_flow_inited)
-		return DOCA_ERROR_IN_USE;
-
-	status = eth_flow_common_init_flow();
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to init doca flow, err: %s", doca_error_get_name(status));
-		return status;
-	}
-
-	status = eth_flow_common_create_flow_port(handles[0]->core_resources.core_objs.dev,
-						  0, &g_demux_flow_resources);
-	if (status != DOCA_SUCCESS)
-		goto cleanup_flow;
-
-	status = build_lsb_demux_single_pipe(handles, nb_queues);
-	if (status != DOCA_SUCCESS)
-		goto destroy_port;
-
-	status = doca_flow_entries_process(g_demux_flow_resources.df_port, 0, 10000, 4);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to process demux entries, err: %s", doca_error_get_name(status));
-		goto destroy_root;
-	}
-
-	g_demux_flow_inited = true;
-	DOCA_LOG_INFO("Installed ESP SN demux pipe over %u rxqs (mask 0x%x)",
-		      nb_queues, (unsigned)(nb_queues - 1));
-	return DOCA_SUCCESS;
-
-destroy_root:
-	doca_flow_pipe_destroy(g_demux_root_pipe);
-	g_demux_root_pipe = NULL;
-destroy_port:
-	(void)eth_flow_common_destroy_flow_port(&g_demux_flow_resources);
-cleanup_flow:
-	eth_flow_common_cleanup_flow();
-	return status;
-}
-
-void eth_rxq_uninstall_demux_flow(void)
-{
-	if (!g_demux_flow_inited)
-		return;
-	if (g_demux_root_pipe != NULL) {
-		doca_flow_pipe_destroy(g_demux_root_pipe);
-		g_demux_root_pipe = NULL;
-	}
-	if (g_demux_pipe != NULL) {
-		doca_flow_pipe_destroy(g_demux_pipe);
-		g_demux_pipe = NULL;
-	}
-	if (g_demux_flow_resources.df_port != NULL)
-		(void)eth_flow_common_destroy_flow_port(&g_demux_flow_resources);
-	eth_flow_common_cleanup_flow();
-	g_demux_root_entry = NULL;
-	for (uint16_t i = 0; i < g_demux_nb_entries; i++)
-		g_demux_entries[i] = NULL;
-	g_demux_nb_entries = 0;
-	g_demux_flow_inited = false;
-}
-
+*/

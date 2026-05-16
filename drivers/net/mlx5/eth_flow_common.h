@@ -49,7 +49,7 @@ struct eth_flow_common_config {
  *
  * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
  */
-doca_error_t eth_flow_common_init_flow(void);
+doca_error_t eth_flow_common_init_flow(uint16_t nb_queues);
 
 /*
  * Cleanup flow for ETH sample

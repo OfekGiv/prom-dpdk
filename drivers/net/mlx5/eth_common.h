@@ -91,4 +91,22 @@ doca_error_t extract_ibdev_name(char *ibdev_name, char *ibdev_name_out);
  */
 doca_error_t extract_mac_addr(char *mac_addr, uint8_t *mac_addr_out);
 
+/*
+ * Start DOCA flow integration on an existing DPDK port using its opened DOCA device
+ *
+ * @dpdk_port_id [in]: DPDK port identifier
+ * @nb_queues [in]: Number of RX queues
+ * @dev [in]: DOCA device associated with the DPDK port
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+doca_error_t rxq_doca_start(uint16_t dpdk_port_id, uint16_t nb_queues,
+			      struct doca_dev *dev, bool bridge_mapped);
+
+/*
+ * Stop DOCA flow integration on a DPDK port and release related resources
+ *
+ * @dpdk_port_id [in]: DPDK port identifier
+ */
+void rxq_doca_stop(uint16_t dpdk_port_id);
+
 #endif /* ETH_COMMON_H_ */

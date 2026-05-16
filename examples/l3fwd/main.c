@@ -46,6 +46,8 @@
 #include <cmdline_parse.h>
 #include <cmdline_parse_etheraddr.h>
 
+#include "../../drivers/net/mlx5/rte_pmd_mlx5.h"
+
 #include "l3fwd.h"
 #include "l3fwd_event.h"
 #include "l3fwd_route.h"
@@ -94,6 +96,10 @@ xmm_t val_eth[RTE_MAX_ETHPORTS];
 
 /* mask of enabled ports */
 uint32_t enabled_port_mask;
+
+/* Optional bridge-first bootstrap parameters */
+static const char *doca_bridge_pci;
+static const char *doca_bridge_devargs;
 
 /* Used only in exact match mode. */
 int ipv6; /**< ipv6 is false by default. */
@@ -418,6 +424,7 @@ print_usage(const char *prgname)
 		" [--eventq-sched]"
 		" [--event-vector [--event-vector-size SIZE] [--event-vector-tmo NS]]"
 #endif
+		" [--doca-bridge-pci BDF] [--doca-bridge-devargs ARGS]"
 		" [-E]"
 		" [-L]\n\n"
 
@@ -439,6 +446,8 @@ print_usage(const char *prgname)
 		"            Default: %d\n"
 		"  --mbcache CACHESZ: Mbuf cache size in decimal\n"
 		"            Default: %d\n"
+		"  --doca-bridge-pci BDF: Bootstrap DOCA-DPDK bridge-first by PCI BDF (example 0000:98:00.0)\n"
+		"  --doca-bridge-devargs ARGS: Optional DOCA bridge probe devargs payload (without PCI BDF)\n"
 		"  --eth-dest=X,MM:MM:MM:MM:MM:MM: Ethernet destination for port X\n"
 		"  --max-pkt-len PKTLEN: maximum packet length in decimal (64-9600)\n"
 		"  --no-numa: Disable numa awareness\n"
@@ -787,6 +796,8 @@ static const char short_options[] =
 #define CMD_LINE_OPT_PKT_RX_BURST "rx-burst"
 #define CMD_LINE_OPT_PKT_TX_BURST "tx-burst"
 #define CMD_LINE_OPT_MB_CACHE_SIZE "mbcache"
+#define CMD_LINE_OPT_DOCA_BRIDGE_PCI "doca-bridge-pci"
+#define CMD_LINE_OPT_DOCA_BRIDGE_DEVARGS "doca-bridge-devargs"
 
 enum {
 	/* long options mapped to a short option */
@@ -820,6 +831,8 @@ enum {
 	CMD_LINE_OPT_PKT_RX_BURST_NUM,
 	CMD_LINE_OPT_PKT_TX_BURST_NUM,
 	CMD_LINE_OPT_MB_CACHE_SIZE_NUM,
+	CMD_LINE_OPT_DOCA_BRIDGE_PCI_NUM,
+	CMD_LINE_OPT_DOCA_BRIDGE_DEVARGS_NUM,
 };
 
 static const struct option lgopts[] = {
@@ -850,6 +863,8 @@ static const struct option lgopts[] = {
 	{CMD_LINE_OPT_PKT_RX_BURST,   1, 0, CMD_LINE_OPT_PKT_RX_BURST_NUM},
 	{CMD_LINE_OPT_PKT_TX_BURST,   1, 0, CMD_LINE_OPT_PKT_TX_BURST_NUM},
 	{CMD_LINE_OPT_MB_CACHE_SIZE,   1, 0, CMD_LINE_OPT_MB_CACHE_SIZE_NUM},
+	{CMD_LINE_OPT_DOCA_BRIDGE_PCI, 1, 0, CMD_LINE_OPT_DOCA_BRIDGE_PCI_NUM},
+	{CMD_LINE_OPT_DOCA_BRIDGE_DEVARGS, 1, 0, CMD_LINE_OPT_DOCA_BRIDGE_DEVARGS_NUM},
 	{NULL, 0, 0, 0}
 };
 
@@ -959,6 +974,14 @@ parse_args(int argc, char **argv)
 
 		case CMD_LINE_OPT_MB_CACHE_SIZE_NUM:
 			parse_mbcache_size(optarg);
+			break;
+
+		case CMD_LINE_OPT_DOCA_BRIDGE_PCI_NUM:
+			doca_bridge_pci = optarg;
+			break;
+
+		case CMD_LINE_OPT_DOCA_BRIDGE_DEVARGS_NUM:
+			doca_bridge_devargs = optarg;
 			break;
 
 		case CMD_LINE_OPT_ETH_DEST_NUM:
@@ -1690,6 +1713,28 @@ main(int argc, char **argv)
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid L3FWD parameters\n");
 
+	if (doca_bridge_pci != NULL) {
+		uint16_t bridge_port_id = RTE_MAX_ETHPORTS;
+
+		ret = rte_pmd_mlx5_doca_bridge_probe_pci(doca_bridge_pci,
+				doca_bridge_devargs, &bridge_port_id);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				"DOCA bridge bootstrap failed for PCI %s (devargs='%s'): %s\n"
+				"Hint: bridge-first mode requires that this NIC is not pre-attached by EAL -a.\n",
+				doca_bridge_pci,
+				doca_bridge_devargs != NULL ? doca_bridge_devargs : "",
+				rte_strerror(-ret));
+		if (bridge_port_id >= (sizeof(enabled_port_mask) * 8))
+			rte_exit(EXIT_FAILURE,
+				"Resolved bridge port id %u exceeds 32-bit portmask range\n",
+				bridge_port_id);
+		enabled_port_mask = (1U << bridge_port_id);
+		RTE_LOG(INFO, L3FWD,
+			"DOCA bridge bootstrap resolved PCI %s to DPDK port %u; enabled_port_mask forced to 0x%x\n",
+			doca_bridge_pci, bridge_port_id, enabled_port_mask);
+	}
+
 	RTE_LOG(INFO, L3FWD, "Using Rx burst %u Tx burst %u\n", rx_burst_size, tx_burst_size);
 
 	/* Setup function pointers for lookup method. */
@@ -1715,6 +1760,33 @@ main(int argc, char **argv)
 	} else
 #endif
 		l3fwd_poll_resource_setup();
+
+	/* Prepare DOCA bridge state for mlx5 ports before starting ethdev. */
+	RTE_ETH_FOREACH_DEV(portid) {
+		struct rte_eth_dev_info dev_info;
+
+		if ((enabled_port_mask & (1 << portid)) == 0)
+			continue;
+		ret = rte_eth_dev_info_get(portid, &dev_info);
+		if (ret != 0) {
+			RTE_LOG(WARNING, L3FWD,
+				"Unable to query port %u info before DOCA bridge prep: %s\n",
+				portid, rte_strerror(-ret));
+			continue;
+		}
+		if (dev_info.driver_name == NULL || strcmp(dev_info.driver_name, "net_mlx5") != 0)
+			continue;
+		ret = rte_pmd_mlx5_doca_bridge_port_prepare(portid);
+		if (ret == 0) {
+			RTE_LOG(INFO, L3FWD,
+				"Prepared DOCA bridge state for mlx5 port %u\n",
+				portid);
+			continue;
+		}
+		RTE_LOG(WARNING, L3FWD,
+			"DOCA bridge prep skipped for mlx5 port %u: %s\n",
+			portid, rte_strerror(-ret));
+	}
 
 	/* start ports */
 	RTE_ETH_FOREACH_DEV(portid) {

@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <mlx5_utils.h>
 #include <doca_bitfield.h>
 #include <doca_log.h>
 #include <doca_flow.h>
@@ -37,8 +38,9 @@ DOCA_LOG_REGISTER(ETH::FLOW::COMMON);
 
 #define COUNTERS_NUM (1 << 19)
 #define DEFAULT_METADATA 1234
+#define ACTIONS_MEMORY_SIZE 0
 
-doca_error_t eth_flow_common_init_flow(void)
+doca_error_t eth_flow_common_init_flow(uint16_t nb_queues)
 {
 	doca_error_t result, tmp_result;
 	struct doca_flow_cfg *flow_cfg;
@@ -48,7 +50,9 @@ doca_error_t eth_flow_common_init_flow(void)
 		DOCA_LOG_ERR("Failed to create doca_flow_cfg, err: %s", doca_error_get_name(result));
 		return result;
 	}
-	result = doca_flow_cfg_set_pipe_queues(flow_cfg, 1);
+    if (nb_queues == 0)
+        nb_queues = 1;
+    result = doca_flow_cfg_set_pipe_queues(flow_cfg, nb_queues);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to set pipe_queues, err: %s", doca_error_get_name(result));
 		goto destroy_cfg;
@@ -108,11 +112,24 @@ static doca_error_t start_doca_flow_port(struct doca_dev *dev, uint16_t port_id,
 		goto destroy_port_cfg;
 	}
 
+    status = doca_flow_port_cfg_set_actions_mem_size(port_cfg, ACTIONS_MEMORY_SIZE);
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set doca_flow_port_cfg actions memory size, err: %s",
+                 doca_error_get_name(status));
+        goto destroy_port_cfg;
+    }
+
 	status = doca_flow_port_cfg_set_dev(port_cfg, dev);
 	if (status != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to set doca_flow_port_cfg dev, err: %s", doca_error_get_name(status));
 		goto destroy_port_cfg;
 	}
+
+    status = doca_flow_port_cfg_set_devargs(port_cfg, "th_win_us=0");
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set doca_flow_port_cfg devargs, err: %s", doca_error_get_name(status));
+        goto destroy_port_cfg;
+    }
 
 	status = doca_flow_port_start(port_cfg, df_port);
 	if (status != DOCA_SUCCESS) {
@@ -145,103 +162,180 @@ static doca_error_t create_root_pipe(struct doca_flow_port *df_port,
 				     struct doca_flow_pipe **root_pipe,
 				     struct doca_flow_pipe_entry **root_entry)
 {
-	doca_error_t status;
-	struct doca_flow_actions actions, *actions_arr[1];
-	struct doca_flow_match match;
-	struct doca_flow_pipe_cfg *pipe_cfg;
-	const char *pipe_name = "ROOT_PIPE";
-	struct doca_flow_fwd all_fwd = {
-		.type = DOCA_FLOW_FWD_RSS,
-		.rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED,
-		.rss =
-			{
-				.queues_array = rxq_queue_ids,
-				.nr_queues = nb_queues,
-				.outer_flags = DOCA_FLOW_RSS_ESP,
-				//.outer_flags = DOCA_FLOW_RSS_IPV4 | DOCA_FLOW_RSS_UDP,
-			},
-	};
+    doca_error_t status;
+    struct doca_flow_pipe_cfg *pipe_cfg;
+    const char *pipe_name = "ROOT_PIPE";
+	uint32_t log_queue_num = log2above(nb_queues);
+	uint32_t calc_match_mask = (1U << log_queue_num) - 1; /* Mask for the highest bit of the queue number, used to split queues into two groups in the example. */
+	uint32_t nb_rules = nb_queues; /* Number of rules to add, one per queue in this example. */
+	int i;
 
-	DOCA_LOG_INFO("Number of RX queues %u", nb_queues);
+    /* Default fwd for miss/non-overridden cases */
+    struct doca_flow_fwd pipe_default_fwd = {
+        .type = DOCA_FLOW_FWD_RSS,
+        .rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED,
+        .rss = {
+            .queues_array = rxq_queue_ids,
+            .nr_queues = nb_queues,
+            .outer_flags = DOCA_FLOW_RSS_ESP,
+        },
+    };
 
+    struct doca_flow_fwd fwd_miss = {
+        .type = DOCA_FLOW_FWD_DROP,
+    };
 
-	struct doca_flow_fwd fwd_miss = {
-		.type = DOCA_FLOW_FWD_DROP,
-	};
+    /* Pipe-level template match/action */
+    struct doca_flow_match match_tmpl;
+    struct doca_flow_match match_mask;
+    struct doca_flow_actions actions_tmpl, *actions_arr[1];
 
-	memset(&match, 0, sizeof(match));
-	memset(&actions, 0, sizeof(actions));
-	actions.meta.pkt_meta = DOCA_HTOBE32(DEFAULT_METADATA);
-	actions_arr[0] = &actions;
+    /* Rule table: ESP SN -> target queue */
+    struct esp_sn_rule_cfg {
+        uint32_t esp_sn;
+        uint16_t queue_id;
+    };
 
+    /* Per-entry objects must stay valid until entries_process */
+    struct esp_sn_rule_cfg *rules;
+    struct doca_flow_match *rule_match;
+    struct doca_flow_actions *rule_actions;
+    struct doca_flow_fwd *rule_fwd;
+    struct doca_flow_pipe_entry **rule_entry;
+    uint16_t (*one_queue)[1];
 
-	match.parser_meta.outer_l3_type = DOCA_FLOW_L3_META_IPV4;
-	match.parser_meta.outer_l4_type = DOCA_FLOW_L4_META_ESP;
-	//match.tun.type = DOCA_FLOW_TUN_ESP;
-	//match.tun.esp_sn = DOCA_HTOBE32(10);
+    if (nb_rules == 0)
+        return DOCA_ERROR_INVALID_VALUE;
 
+    rules = calloc(nb_rules, sizeof(*rules));
+    rule_match = calloc(nb_rules, sizeof(*rule_match));
+    rule_actions = calloc(nb_rules, sizeof(*rule_actions));
+    rule_fwd = calloc(nb_rules, sizeof(*rule_fwd));
+    rule_entry = calloc(nb_rules, sizeof(*rule_entry));
+    one_queue = calloc(nb_rules, sizeof(*one_queue));
+    if (rules == NULL || rule_match == NULL || rule_actions == NULL || rule_fwd == NULL ||
+        rule_entry == NULL || one_queue == NULL) {
+        DOCA_LOG_ERR("Failed to allocate root pipe rule arrays");
+        status = DOCA_ERROR_NO_MEMORY;
+        goto cleanup_arrays;
+    }
 
-	status = doca_flow_pipe_cfg_create(&pipe_cfg, df_port);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to create doca_flow_pipe_cfg, err: %s", doca_error_get_name(status));
-		return status;
-	}
+    for (i = 0; i < nb_rules; i++) {
+        rules[i].esp_sn = i;
+        rules[i].queue_id = rxq_queue_ids[i];
+    }
 
-	status = doca_flow_pipe_cfg_set_name(pipe_cfg, pipe_name);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to set doca_flow_pipe_cfg name, err: %s", doca_error_get_name(status));
-		goto destroy_pipe_cfg;
-	}
-	status = doca_flow_pipe_cfg_set_type(pipe_cfg, DOCA_FLOW_PIPE_BASIC);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to set doca_flow_pipe_cfg type, err: %s", doca_error_get_name(status));
-		goto destroy_pipe_cfg;
-	}
-	status = doca_flow_pipe_cfg_set_is_root(pipe_cfg, true);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to set doca_flow_pipe_cfg is_root, err: %s", doca_error_get_name(status));
-		goto destroy_pipe_cfg;
-	}
-	status = doca_flow_pipe_cfg_set_match(pipe_cfg, &match, NULL);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to set doca_flow_pipe_cfg match, err: %s", doca_error_get_name(status));
-		goto destroy_pipe_cfg;
-	}
-	status = doca_flow_pipe_cfg_set_actions(pipe_cfg, actions_arr, NULL, NULL, 1);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to set doca_flow_pipe_cfg actions: %s", doca_error_get_descr(status));
-		goto destroy_pipe_cfg;
-	}
+    memset(&match_tmpl, 0, sizeof(match_tmpl));
+    memset(&match_mask, 0, sizeof(match_mask));
+    memset(&actions_tmpl, 0, sizeof(actions_tmpl));
 
-	status = doca_flow_pipe_create(pipe_cfg, &all_fwd, &fwd_miss, root_pipe);
-	if (status != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to create doca flow pipe, err: %s", doca_error_get_name(status));
-		goto destroy_pipe_cfg;
-	}
-	doca_flow_pipe_cfg_destroy(pipe_cfg);
+    /* Template declares we match IPv4+ESP+ESP tunnel fields (including esp_sn per entry) */
+    match_tmpl.parser_meta.outer_l3_type = DOCA_FLOW_L3_META_IPV4;
+    match_tmpl.parser_meta.outer_l4_type = DOCA_FLOW_L4_META_ESP;
+    match_tmpl.tun.type = DOCA_FLOW_TUN_ESP;
+    match_tmpl.tun.esp_sn = UINT32_MAX; /* wildcard in template */
 
-	status =
-		doca_flow_pipe_basic_add_entry(0, *root_pipe, &match, 0, &actions, NULL, NULL, 0, NULL, root_entry);
-	if (status != DOCA_SUCCESS) {
-		doca_flow_pipe_destroy(*root_pipe);
-		DOCA_LOG_ERR("Failed to add doca flow entry, err: %s", doca_error_get_name(status));
-		return status;
-	}
+	match_mask.tun.esp_sn =  DOCA_HTOBE32(calc_match_mask);
 
-	status = doca_flow_entries_process(df_port, 0, 10000, 4);
-	if (status != DOCA_SUCCESS) {
-		doca_flow_pipe_destroy(*root_pipe);
-		DOCA_LOG_ERR("Failed to process doca flow entry, err: %s", doca_error_get_name(status));
-		return status;
-	}
+    actions_tmpl.meta.pkt_meta = DOCA_HTOBE32(DEFAULT_METADATA);
+    actions_arr[0] = &actions_tmpl;
 
-	DOCA_LOG_INFO("Created Pipe \033[38;5;208m%s\033[0m", pipe_name);
+    status = doca_flow_pipe_cfg_create(&pipe_cfg, df_port);
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to create doca_flow_pipe_cfg, err: %s", doca_error_get_name(status));
+        goto cleanup_arrays;
+    }
 
-	return DOCA_SUCCESS;
+    status = doca_flow_pipe_cfg_set_name(pipe_cfg, pipe_name);
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set pipe name, err: %s", doca_error_get_name(status));
+        goto destroy_pipe_cfg;
+    }
+
+    status = doca_flow_pipe_cfg_set_type(pipe_cfg, DOCA_FLOW_PIPE_BASIC);
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set pipe type, err: %s", doca_error_get_name(status));
+        goto destroy_pipe_cfg;
+    }
+
+    status = doca_flow_pipe_cfg_set_is_root(pipe_cfg, true);
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set pipe root, err: %s", doca_error_get_name(status));
+        goto destroy_pipe_cfg;
+    }
+
+    status = doca_flow_pipe_cfg_set_match(pipe_cfg, &match_tmpl, &match_mask);
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set pipe match, err: %s", doca_error_get_name(status));
+        goto destroy_pipe_cfg;
+    }
+
+    status = doca_flow_pipe_cfg_set_actions(pipe_cfg, actions_arr, NULL, NULL, 1);
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to set pipe actions, err: %s", doca_error_get_name(status));
+        goto destroy_pipe_cfg;
+    }
+
+    status = doca_flow_pipe_create(pipe_cfg, &pipe_default_fwd, &fwd_miss, root_pipe);
+    if (status != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to create root pipe, err: %s", doca_error_get_name(status));
+        goto destroy_pipe_cfg;
+    }
+    doca_flow_pipe_cfg_destroy(pipe_cfg);
+
+    /* Add one entry per ESP SN with per-entry RSS queue */
+    for (i = 0; i < nb_rules; i++) {
+        rule_match[i].parser_meta.outer_l3_type = DOCA_FLOW_L3_META_IPV4;
+        rule_match[i].parser_meta.outer_l4_type = DOCA_FLOW_L4_META_ESP;
+        rule_match[i].tun.type = DOCA_FLOW_TUN_ESP;
+        rule_match[i].tun.esp_sn = DOCA_HTOBE32(rules[i].esp_sn);
+
+        rule_actions[i].meta.pkt_meta = DOCA_HTOBE32(DEFAULT_METADATA + i);
+
+        one_queue[i][0] = rules[i].queue_id;
+        rule_fwd[i].type = DOCA_FLOW_FWD_RSS;
+        rule_fwd[i].rss_type = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED;
+        rule_fwd[i].rss.queues_array = one_queue[i];
+        rule_fwd[i].rss.nr_queues = 1;
+        rule_fwd[i].rss.outer_flags = DOCA_FLOW_RSS_ESP;
+
+        status = doca_flow_pipe_basic_add_entry(0, *root_pipe,
+                               &rule_match[i], NULL,
+                               &rule_actions[i], NULL,
+                               &rule_fwd[i],
+                               0, NULL, &rule_entry[i]);
+        if (status != DOCA_SUCCESS) {
+            doca_flow_pipe_destroy(*root_pipe);
+            DOCA_LOG_ERR("Failed to add entry %u, err: %s", i, doca_error_get_name(status));
+            goto cleanup_arrays;
+        }
+    }
+
+    status = doca_flow_entries_process(df_port, 0, 10000, nb_rules);
+    if (status != DOCA_SUCCESS) {
+        doca_flow_pipe_destroy(*root_pipe);
+        DOCA_LOG_ERR("Failed to process entries, err: %s", doca_error_get_name(status));
+        goto cleanup_arrays;
+    }
+
+    /* Keep first handle for compatibility with existing API */
+    if (root_entry != NULL)
+        *root_entry = rule_entry[0];
+
+    DOCA_LOG_INFO("Created Pipe with %u ESP-SN rules: %s", nb_rules, pipe_name);
+
+cleanup_arrays:
+    free(one_queue);
+    free(rule_entry);
+    free(rule_fwd);
+    free(rule_actions);
+    free(rule_match);
+    free(rules);
+    return status;
 
 destroy_pipe_cfg:
-	doca_flow_pipe_cfg_destroy(pipe_cfg);
-	return status;
+    doca_flow_pipe_cfg_destroy(pipe_cfg);
+    goto cleanup_arrays;
 }
 
 doca_error_t eth_flow_common_create_flow_port(struct doca_dev *dev,

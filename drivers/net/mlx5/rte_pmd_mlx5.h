@@ -626,6 +626,58 @@ __rte_experimental
 int
 rte_pmd_mlx5_enable_steering(void);
 
+/**
+ * Prepare mlx5 PMD DOCA bridge state for a DPDK port.
+ *
+ * This API consumes an already established DOCA-DPDK bridge association
+ * for @p port_id and caches the associated DOCA device inside mlx5 PMD.
+ *
+ * It does not probe or attach DPDK devices. If the port is not associated
+ * with the DOCA-DPDK bridge, this function fails.
+ *
+ * @param[in] port_id
+ *   DPDK port id.
+ *
+ * @return
+ *   - 0 on success.
+ *   - (-EINVAL) if @p port_id is invalid.
+ *   - (-ENODEV) if the port is not associated with DOCA-DPDK bridge.
+ */
+__rte_experimental
+int
+rte_pmd_mlx5_doca_bridge_port_prepare(uint16_t port_id);
+
+/**
+ * Probe and bootstrap a DOCA-DPDK bridge association by PCI address.
+ *
+ * This API opens a DOCA device for @p pci_addr, probes a DPDK port through
+ * DOCA-DPDK bridge, resolves the associated DPDK port id, and caches bridge
+ * state inside mlx5 PMD.
+ *
+ * It is intended for bridge-first startup flows where the target NIC is not
+ * pre-attached by regular DPDK EAL probing.
+ *
+ * @param[in] pci_addr
+ *   PCI BDF (for example "0000:98:00.0").
+ * @param[in] probe_devargs
+ *   Optional DPDK devargs payload for bridge probe (arguments only, without
+ *   PCI BDF). Pass NULL for empty string.
+ * @param[out] port_id
+ *   Optional output for the resulting DPDK port id.
+ *
+ * @return
+ *   - 0 on success.
+ *   - (-EINVAL) if arguments are invalid.
+ *   - (-EEXIST) if the resolved DPDK port already has cached DOCA bridge state.
+ *   - (-ENODEV) if DOCA device open fails for the given PCI address.
+ *   - (-EIO) on bridge probe / port-id resolution failures.
+ */
+__rte_experimental
+int
+rte_pmd_mlx5_doca_bridge_probe_pci(const char *pci_addr,
+				    const char *probe_devargs,
+				    uint16_t *port_id);
+
 #ifdef __cplusplus
 }
 #endif
