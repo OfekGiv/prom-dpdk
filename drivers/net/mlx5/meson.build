@@ -50,7 +50,7 @@ sources = files(
         'common.c',
         'eth_flow_common.c',
         'eth_rxq_common.c',
-        'eth_rxq_regular_receive_sample.c',
+        'doca_flow_dpdk.c',
 
 )
 

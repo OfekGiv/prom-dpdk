@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#ifndef ETH_RXQ_REGULAR_RECEIVE_SAMPLE_H_
-#define ETH_RXQ_REGULAR_RECEIVE_SAMPLE_H_
+#ifndef DOCA_FLOW_DPDK_H_
+#define DOCA_FLOW_DPDK_H_
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -47,5 +47,5 @@ void eth_rxq_uninstall_demux_flow(void);
 }
 #endif
 
-#endif /* ETH_RXQ_REGULAR_RECEIVE_SAMPLE_H_ */
+#endif /* DOCA_FLOW_DPDK_H_ */
 

@@ -44,6 +44,10 @@
 #include <rte_byteorder.h>
 #include <rte_ether.h>
 #include <rte_ip.h>
+#include <rte_errno.h>
+#include <eal_export.h>
+#include "rte_pmd_mlx5.h"
+
 
 DOCA_LOG_REGISTER(ETH_RXQ_REGULAR_RECEIVE);
 
@@ -69,6 +73,114 @@ struct eth_rxq_sample_objects {
 	uint16_t rxq_queue_id;				 /* DOCA ETH RXQ's queue ID */
 	bool timestamp_enable;				 /* timestamp enable */
 };
+
+struct doca_dev *doca_devs[RTE_MAX_ETHPORTS];
+bool doca_devs_owned[RTE_MAX_ETHPORTS];
+bool doca_devs_bridge_mapped[RTE_MAX_ETHPORTS];
+
+RTE_EXPORT_EXPERIMENTAL_SYMBOL(rte_pmd_mlx5_doca_bridge_port_prepare, 25.11)
+int
+rte_pmd_mlx5_doca_bridge_port_prepare(uint16_t port_id)
+{
+	doca_error_t status;
+	struct doca_dev *dev = NULL;
+
+	if (port_id >= RTE_MAX_ETHPORTS) {
+		rte_errno = EINVAL;
+		return -rte_errno;
+	}
+	status = doca_dpdk_port_as_dev(port_id, &dev);
+	if (status != DOCA_SUCCESS || dev == NULL) {
+		rte_errno = ENODEV;
+		return -rte_errno;
+	}
+	doca_devs[port_id] = dev;
+	doca_devs_owned[port_id] = false;
+	doca_devs_bridge_mapped[port_id] = true;
+	return 0;
+}
+
+RTE_EXPORT_EXPERIMENTAL_SYMBOL(rte_pmd_mlx5_doca_bridge_probe_pci, 25.11)
+int
+rte_pmd_mlx5_doca_bridge_probe_pci(const char *pci_addr,
+				    const char *probe_devargs,
+				    uint16_t *port_id)
+{
+	struct doca_dev *dev = NULL;
+	doca_error_t status;
+	uint16_t resolved_port_id;
+
+	if (pci_addr == NULL || pci_addr[0] == '\0') {
+		rte_errno = EINVAL;
+		return -rte_errno;
+	}
+	status = open_doca_device_with_pci(pci_addr, NULL, &dev);
+	if (status != DOCA_SUCCESS || dev == NULL) {
+		rte_errno = ENODEV;
+		return -rte_errno;
+	}
+	status = doca_dpdk_port_probe(dev, probe_devargs != NULL ? probe_devargs : "");
+	if (status != DOCA_SUCCESS) {
+		(void)doca_dev_close(dev);
+		rte_errno = EIO;
+		return -rte_errno;
+	}
+	status = doca_dpdk_get_first_port_id(dev, &resolved_port_id);
+	if (status != DOCA_SUCCESS || resolved_port_id >= RTE_MAX_ETHPORTS) {
+		(void)doca_dev_close(dev);
+		rte_errno = EIO;
+		return -rte_errno;
+	}
+	if (doca_devs[resolved_port_id] != NULL) {
+		(void)doca_dev_close(dev);
+		rte_errno = EEXIST;
+		return -rte_errno;
+	}
+	doca_devs[resolved_port_id] = dev;
+	/*
+	 * Bridge-probed ports should be treated like bridge-associated devices,
+	 * i.e. not manually closed by mlx5 stop path.
+	 */
+	doca_devs_owned[resolved_port_id] = false;
+	doca_devs_bridge_mapped[resolved_port_id] = true;
+	if (port_id != NULL)
+		*port_id = resolved_port_id;
+	return 0;
+}
+
+static void
+entry_process_cb(struct doca_flow_pipe_entry *entry,
+                 uint16_t pipe_queue,
+                 enum doca_flow_entry_status status,
+                 enum doca_flow_entry_op op,
+                 void *user_ctx)
+{
+    const char *op_str = "UNKNOWN";
+
+    switch (op) {
+    case DOCA_FLOW_ENTRY_OP_ADD:
+        op_str = "ADD";
+        break;
+    case DOCA_FLOW_ENTRY_OP_DEL:
+        op_str = "DEL";
+        break;
+    default:
+        break;
+    }
+
+    printf("DOCA Flow entry process callback:\n");
+    printf("  entry      = %p\n", (void *)entry);
+    printf("  queue      = %u\n", pipe_queue);
+    printf("  operation  = %s\n", op_str);
+    printf("  status     = %d\n", status);
+    printf("  user_ctx   = %p\n", user_ctx);
+
+    if (status != DOCA_FLOW_ENTRY_STATUS_SUCCESS) {
+        printf("  result     = FAILED\n");
+    } else {
+        printf("  result     = SUCCESS\n");
+    }
+}
 
 static void print_esp_sn(struct doca_buf *pkt)
 {
