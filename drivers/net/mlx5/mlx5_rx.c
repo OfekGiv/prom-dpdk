@@ -1203,6 +1203,7 @@ mlx5_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 		/* Increment bytes counter. */
 		rxq->stats.ibytes += PKT_LEN(pkt);
 #endif
+/*
 		{
 			uint32_t esp_sn;
 
@@ -1212,6 +1213,7 @@ mlx5_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 					rte_lcore_id(), rxq->port_id, rxq->idx, esp_sn);
 			}
 		}
+*/
 		/* Return packet. */
 		*(pkts++) = pkt;
 		pkt = NULL;
