@@ -83,6 +83,9 @@
 #define MLX5_MU_SQ_LOG_GRP_SIZE "mu_sq_log_grp_size"
 #define MLX5_MU_SQ_LOG_GRP_MAX_SIZE 7 /* Max group size is 128 (2 ^ 7) */
 
+/* Device parameter to enable DOCA forwarding path. */
+#define MLX5_DOCA_EN "doca_en"
+
 /*
  * Device parameter to configure the number of TX queues threshold for
  * enabling inline send.
@@ -2726,6 +2729,20 @@ mlx5_port_args_check_handler(const char *key, const char *val, void *opaque)
 	/* No-op, port representors are processed in mlx5_dev_spawn(). */
 	if (!strcmp(MLX5_REPRESENTOR, key))
 		return 0;
+	if (!strcmp(MLX5_DOCA_EN, key)) {
+		if (!strcmp(val, "true")) {
+			config->doca_en = 1;
+		} else if (!strcmp(val, "false")) {
+			config->doca_en = 0;
+		} else {
+			rte_errno = EINVAL;
+			DRV_LOG(WARNING,
+				"%s: invalid boolean value \"%s\" (expected true/false)",
+				key, val);
+			return -rte_errno;
+		}
+		return 0;
+	}
 	errno = 0;
 	tmp = strtol(val, NULL, 0);
 	if (errno) {
@@ -2853,6 +2870,7 @@ mlx5_port_args_config(struct mlx5_priv *priv, struct mlx5_kvargs_ctrl *mkvlist,
 		MLX5_HP_BUF_SIZE,
 		MLX5_DELAY_DROP,
 		MLX5_MU_SQ_LOG_GRP_SIZE,
+		MLX5_DOCA_EN,
 		NULL,
 	};
 	int ret = 0;
@@ -2874,6 +2892,7 @@ mlx5_port_args_config(struct mlx5_priv *priv, struct mlx5_kvargs_ctrl *mkvlist,
 	config->std_delay_drop = 0;
 	config->hp_delay_drop = 0;
 	config->mu_sq_log_grp_size = 0;
+	config->doca_en = 0;
 	if (mkvlist != NULL) {
 		/* Process parameters. */
 		ret = mlx5_kvargs_process(mkvlist, params,
@@ -2981,6 +3000,7 @@ mlx5_port_args_config(struct mlx5_priv *priv, struct mlx5_kvargs_ctrl *mkvlist,
 	DRV_LOG(DEBUG, "\"txq_inline_min\" is %d.", config->txq_inline_min);
 	DRV_LOG(DEBUG, "\"txq_inline_max\" is %d.", config->txq_inline_max);
 	DRV_LOG(DEBUG, "\"txq_inline_mpw\" is %d.", config->txq_inline_mpw);
+	DRV_LOG(DEBUG, "\"doca_en\" is %u.", config->doca_en);
 	return 0;
 }
 
@@ -3051,6 +3071,7 @@ mlx5_port_args_set_used(const char *name, uint16_t port_id,
 		MLX5_HP_BUF_SIZE,
 		MLX5_DELAY_DROP,
 		MLX5_MU_SQ_LOG_GRP_SIZE,
+		MLX5_DOCA_EN,
 		NULL,
 	};
 

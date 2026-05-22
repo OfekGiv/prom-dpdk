@@ -380,6 +380,7 @@ struct mlx5_port_config {
 	int txq_inline_max; /* Max packet size for inlining with SEND. */
 	int txq_inline_mpw; /* Max packet size for inlining with eMPW. */
 	uint8_t mu_sq_log_grp_size; /* Log of Multi-User SQ group size */
+	uint8_t doca_en; /* Enable DOCA forwarding path. */
 };
 
 /*
