@@ -48,6 +48,7 @@
 #include "l3fwd.h"
 #include "l3fwd_event.h"
 #include "l3fwd_route.h"
+#include "doca_pipelines_shim.h"
 
 #define MAX_TX_QUEUE_PER_PORT RTE_MAX_LCORE
 #define MAX_RX_QUEUE_PER_PORT 128
@@ -785,6 +786,7 @@ static const char short_options[] =
 #define CMD_LINE_OPT_PKT_RX_BURST "rx-burst"
 #define CMD_LINE_OPT_PKT_TX_BURST "tx-burst"
 #define CMD_LINE_OPT_MB_CACHE_SIZE "mbcache"
+#define CMD_LINE_OPT_QUEUES "queues"
 
 enum {
 	/* long options mapped to a short option */
@@ -818,6 +820,7 @@ enum {
 	CMD_LINE_OPT_PKT_RX_BURST_NUM,
 	CMD_LINE_OPT_PKT_TX_BURST_NUM,
 	CMD_LINE_OPT_MB_CACHE_SIZE_NUM,
+	CMD_LINE_OPT_QUEUES_NUM,
 };
 
 static const struct option lgopts[] = {
@@ -848,6 +851,7 @@ static const struct option lgopts[] = {
 	{CMD_LINE_OPT_PKT_RX_BURST,   1, 0, CMD_LINE_OPT_PKT_RX_BURST_NUM},
 	{CMD_LINE_OPT_PKT_TX_BURST,   1, 0, CMD_LINE_OPT_PKT_TX_BURST_NUM},
 	{CMD_LINE_OPT_MB_CACHE_SIZE,   1, 0, CMD_LINE_OPT_MB_CACHE_SIZE_NUM},
+	{CMD_LINE_OPT_QUEUES, 1, 0, CMD_LINE_OPT_QUEUES_NUM},
 	{NULL, 0, 0, 0}
 };
 
@@ -1051,6 +1055,11 @@ parse_args(int argc, char **argv)
 			break;
 		case CMD_LINE_OPT_ALG_NUM:
 			l3fwd_set_alg(optarg);
+			break;
+		case CMD_LINE_OPT_QUEUES_NUM:
+			/* pre_parse_args() already consumes this value for DOCA init.
+			* Keep this handler so parse_args does not reject --queues.
+			*/
 			break;
 		default:
 			print_usage(prgname);
@@ -1649,6 +1658,135 @@ l3fwd_event_service_setup(void)
 }
 #endif
 
+static int replace_bdf_to_aux_bdf(char *arg, char **bdf)
+{
+
+	char * aux_bdf = "0000:00:00.0";
+	size_t old_len = strcspn(arg, ",");
+	size_t new_len = strlen(aux_bdf);
+	size_t total_len = strlen(arg);
+
+	/*
+         * Save old token before modifying str.
+         * strndup allocates a new string.
+         */
+	*bdf = strndup(arg, old_len);
+	if (*bdf == NULL) {
+		return -1;
+	}
+
+	memmove(arg + new_len,
+	 arg + old_len,
+	 total_len - old_len + 1);
+
+	memcpy(arg, aux_bdf, new_len);
+
+	return 0;
+}
+
+static char * parse_bdf(char *arg) {
+	char *bdf = NULL;
+
+	bdf = strtok_r(arg, ",", &arg);
+	if (bdf == NULL) {
+		fprintf(stderr, "Could not parse bdf\n");
+		return NULL;
+	}
+	return bdf;
+}
+
+static int add_auxiliary_arg(int argc, char **argv, int *new_argc, char ***new_argv)
+{
+    int insert_idx = -1;
+    int extra = 2; /* "-a", "auxiliary" */
+if (!argv || !new_argc || !new_argv) {
+        return -1;
+    }
+
+    /*
+     * Find "-a <argument>"
+     */
+    for (int i = 0; i < argc - 1; i++) {
+        if (strcmp(argv[i], "-a") == 0) {
+            insert_idx = i + 2; /* after "-a" and its argument */
+            break;
+        }
+    }
+
+    if (insert_idx < 0) {
+        return -2; /* "-a <argument>" not found */
+    }
+
+    char **out = malloc((argc + extra + 1) * sizeof(char *));
+    if (!out) {
+        return -3;
+    }
+
+    /*
+     * Copy args before insertion point
+     */
+    for (int i = 0; i < insert_idx; i++) {
+        out[i] = argv[i];
+    }
+
+    /*
+     * Insert new args
+     */
+    out[insert_idx]     = "-a";
+    out[insert_idx + 1] = "auxiliary:";
+
+    /*
+     * Copy remaining original args
+     */
+    for (int i = insert_idx; i < argc; i++) {
+        out[i + extra] = argv[i];
+    }
+
+    *new_argc = argc + extra;
+    out[*new_argc] = NULL;
+
+    *new_argv = out;
+
+    return 0;
+}
+
+
+static int pre_parse_args(int *argc, char ***argv, char **pci, char **lcores, uint16_t *nb_queues)
+{
+	*pci = NULL;
+	*lcores = NULL;
+	*nb_queues = 0;
+
+	for (int i = 1; i < *argc; i++) {
+		if ((strcmp((*argv)[i], "--allow") == 0 || strcmp((*argv)[i], "-a") == 0) && i + 1 < *argc) {
+			replace_bdf_to_aux_bdf((*argv)[++i], pci);
+			//pci = parse_bdf(argv[++i]);
+		} else if ((strcmp((*argv)[i], "-l") == 0 || strcmp((*argv)[i], "--lcores") == 0) && i + 1 < *argc) {
+			*lcores = (*argv)[++i];
+		} else if (strcmp((*argv)[i], "--queues") == 0 && i + 1 < *argc) {
+			*nb_queues = (uint16_t)(atoi((*argv)[++i]));
+		} else {
+			continue;
+		}
+	}
+
+	if (*pci == NULL || *lcores == NULL || *nb_queues == 0) {
+		fprintf(stderr, "Could not parse pci/lcore/nb_queues\n");
+		return -1;
+	}
+	if ((*nb_queues & (*nb_queues - 1u)) != 0) {
+		fprintf(stderr, "--queues must be a power of 2 (got %u)\n", *nb_queues);
+		return -1;
+	}
+	int new_argc;
+	char **new_argv;
+	add_auxiliary_arg(*argc, *argv, &new_argc, &new_argv);
+	*argc = new_argc;
+	*argv = new_argv;
+	return 0;
+}
+
+
 int
 main(int argc, char **argv)
 {
@@ -1661,8 +1799,13 @@ main(int argc, char **argv)
 	unsigned int lcore_id;
 	uint16_t queue;
 	int ret;
+	char *pci = NULL;
+	char *lcores = NULL;
+	uint16_t nb_queues;
+
 
 	/* init EAL */
+	pre_parse_args(&argc, &argv, &pci, &lcores, &nb_queues);
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid EAL parameters\n");
@@ -1672,6 +1815,12 @@ main(int argc, char **argv)
 	force_quit = false;
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
+
+	RTE_LOG(INFO, L3FWD, "EAL ok; probing DOCA DPDK bridge for PCI %s\n", pci);
+    if (l3fwd_doca_pipelines_dpdk_probe(pci) < 0) {
+        RTE_LOG(ERR, L3FWD, "l3fwd_doca_pipelines_dpdk_probe failed\n");
+        return EXIT_FAILURE;
+    }
 
 	/* pre-init dst MACs for all ports to 02:00:00:00:00:xx */
 	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
@@ -1761,6 +1910,13 @@ main(int argc, char **argv)
 	}
 
 	check_all_ports_link_status(enabled_port_mask);
+
+	RTE_LOG(INFO, L3FWD, "Installing meta_rr pipeline for %u queues\n", nb_queues);
+    if (l3fwd_doca_pipelines_init(nb_queues) < 0) {
+        RTE_LOG(ERR, L3FWD, "doca_pipelines_init failed\n");
+        l3fwd_doca_pipelines_cleanup();
+        return EXIT_FAILURE;
+    }
 
 	ret = 0;
 	/* launch per-lcore init on every lcore */
@@ -1860,7 +2016,8 @@ main(int argc, char **argv)
 
 	/* clean up the EAL */
 	rte_eal_cleanup();
-
+	l3fwd_doca_pipelines_cleanup();
+	
 	printf("Bye...\n");
 
 	return ret;

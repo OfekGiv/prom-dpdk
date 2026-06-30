@@ -7,7 +7,7 @@
 # DPDK instance, use 'make'
 
 allow_experimental_apis = true
-deps += ['acl', 'hash', 'lpm', 'fib']
+deps += ['acl', 'hash', 'lpm', 'fib', 'pci']
 sources = files(
         'l3fwd_acl.c',
         'l3fwd_em.c',
