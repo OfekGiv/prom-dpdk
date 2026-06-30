@@ -99,6 +99,9 @@ subdir('app')
 # build docs
 subdir('doc')
 
+# build doca_pipelines_sdk
+subdir('doca_pipelines_sdk')
+
 # build any examples explicitly requested - useful for developers - and
 # install any example code into the appropriate install path
 subdir('examples')
@@ -135,6 +138,7 @@ subdir('buildtools/pkg-config')
 if meson.is_subproject()
     subdir('buildtools/subproject')
 endif
+
 
 # Final output, list all the parts to be built.
 # This does not affect any part of the build, for information only.

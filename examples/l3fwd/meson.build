@@ -18,6 +18,11 @@ sources = files(
         'l3fwd_lpm.c',
         'main.c',
 )
+ext_deps += [doca_pipelines_meta_rr_dep]
+includes += include_directories(
+    '../../doca_pipelines_sdk/include',
+    '../../doca_pipelines_sdk/src',
+)
 if dpdk_conf.has('RTE_LIB_EVENTDEV')
     deps += 'eventdev'
 endif
