@@ -6,9 +6,9 @@
 
 extern "C" {
 
-int l3fwd_doca_pipelines_dpdk_probe(const char *pci_bdf)
+int l3fwd_doca_pipelines_dpdk_probe(const char *pci_bdf, const char *extra_devargs)
 {
-    return doca_pipelines_dpdk_probe(pci_bdf);
+	return doca_pipelines_dpdk_probe(pci_bdf, extra_devargs);
 }
 
 int l3fwd_doca_pipelines_init(uint16_t nb_queues)

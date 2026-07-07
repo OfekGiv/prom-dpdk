@@ -83,7 +83,7 @@ struct doca_pipelines_ctx_t {
 /** After rte_eal_init(), before rte_eth_dev_configure.
  * @param pci_bdf - the PCI BDF of the first doca port
  */
-int doca_pipelines_dpdk_probe(const char *pci_bdf);
+int doca_pipelines_dpdk_probe(const char *pci_bdf, const char *extra_devargs);
 int doca_pipelines_init(uint16_t nb_queues);
 void doca_pipelines_cleanup(void);
 

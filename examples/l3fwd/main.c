@@ -1658,31 +1658,93 @@ l3fwd_event_service_setup(void)
 }
 #endif
 
+static char *xstrndup(const char *s, size_t n)
+{
+    char *p = malloc(n + 1);
+    if (p == NULL)
+        return NULL;
+
+    memcpy(p, s, n);
+    p[n] = '\0';
+    return p;
+}
+
+static int replace_bdf_to_aux_bdf(char *arg, char **bdf, char **devargs)
+{
+    const char *aux_bdf = "0000:00:00.0";
+    const char *comma;
+    size_t bdf_len;
+    size_t new_len;
+
+    if (arg == NULL || bdf == NULL || devargs == NULL)
+        return -1;
+
+    *bdf = NULL;
+    *devargs = NULL;
+
+    /*
+     * Split original arg:
+     *
+     *   "0000:98:00.0,mu_sq_log_grp_size=3"
+     *
+     * into:
+     *
+     *   bdf     = "0000:98:00.0"
+     *   devargs = "mu_sq_log_grp_size=3"
+     */
+    comma = strchr(arg, ',');
+    if (comma != NULL) {
+        bdf_len = comma - arg;
+
+        *bdf = malloc(bdf_len + 1);
+        if (*bdf == NULL)
+            return -1;
+
+        memcpy(*bdf, arg, bdf_len);
+        (*bdf)[bdf_len] = '\0';
+
+        if (*(comma + 1) != '\0') {
+            *devargs = strdup(comma + 1);
+            if (*devargs == NULL) {
+                free(*bdf);
+                *bdf = NULL;
+                return -1;
+            }
+        }
+    } else {
+        *bdf = strdup(arg);
+        if (*bdf == NULL)
+            return -1;
+    }
+
+    /* Overwrite arg with only auxiliary/dummy BDF for EAL */
+    new_len = strlen(aux_bdf);
+    memcpy(arg, aux_bdf, new_len + 1); /* include '\0' */
+
+    return 0;
+}
+
+/*
 static int replace_bdf_to_aux_bdf(char *arg, char **bdf)
 {
+    const char *aux_bdf = "0000:00:00.0";
+    size_t new_len;
 
-	char * aux_bdf = "0000:00:00.0";
-	size_t old_len = strcspn(arg, ",");
-	size_t new_len = strlen(aux_bdf);
-	size_t total_len = strlen(arg);
+    if (arg == NULL || bdf == NULL)
+        return -1;
 
-	/*
-         * Save old token before modifying str.
-         * strndup allocates a new string.
-         */
-	*bdf = strndup(arg, old_len);
-	if (*bdf == NULL) {
-		return -1;
-	}
+    // Keep full original: "0000:98:00.0,mu_sq_log_grp_size=3"
+    *bdf = strdup(arg);
+    if (*bdf == NULL)
+        return -1;
 
-	memmove(arg + new_len,
-	 arg + old_len,
-	 total_len - old_len + 1);
+    // Overwrite arg with only auxiliary BDF
+    new_len = strlen(aux_bdf);
+    memcpy(arg, aux_bdf, new_len + 1); // include '\0'
 
-	memcpy(arg, aux_bdf, new_len);
-
-	return 0;
+    return 0;
 }
+*/
 
 static char * parse_bdf(char *arg) {
 	char *bdf = NULL;
@@ -1751,7 +1813,7 @@ if (!argv || !new_argc || !new_argv) {
 }
 
 
-static int pre_parse_args(int *argc, char ***argv, char **pci, char **lcores, uint16_t *nb_queues)
+static int pre_parse_args(int *argc, char ***argv, char **pci, char **lcores, uint16_t *nb_queues, char **devargs)
 {
 	*pci = NULL;
 	*lcores = NULL;
@@ -1759,7 +1821,7 @@ static int pre_parse_args(int *argc, char ***argv, char **pci, char **lcores, ui
 
 	for (int i = 1; i < *argc; i++) {
 		if ((strcmp((*argv)[i], "--allow") == 0 || strcmp((*argv)[i], "-a") == 0) && i + 1 < *argc) {
-			replace_bdf_to_aux_bdf((*argv)[++i], pci);
+			replace_bdf_to_aux_bdf((*argv)[++i], pci, devargs);
 			//pci = parse_bdf(argv[++i]);
 		} else if ((strcmp((*argv)[i], "-l") == 0 || strcmp((*argv)[i], "--lcores") == 0) && i + 1 < *argc) {
 			*lcores = (*argv)[++i];
@@ -1801,11 +1863,12 @@ main(int argc, char **argv)
 	int ret;
 	char *pci = NULL;
 	char *lcores = NULL;
+	char *devargs = NULL;
 	uint16_t nb_queues;
 
 
 	/* init EAL */
-	pre_parse_args(&argc, &argv, &pci, &lcores, &nb_queues);
+	pre_parse_args(&argc, &argv, &pci, &lcores, &nb_queues, &devargs);
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid EAL parameters\n");
@@ -1817,7 +1880,7 @@ main(int argc, char **argv)
 	signal(SIGTERM, signal_handler);
 
 	RTE_LOG(INFO, L3FWD, "EAL ok; probing DOCA DPDK bridge for PCI %s\n", pci);
-    if (l3fwd_doca_pipelines_dpdk_probe(pci) < 0) {
+    if (l3fwd_doca_pipelines_dpdk_probe(pci, devargs) < 0) {
         RTE_LOG(ERR, L3FWD, "l3fwd_doca_pipelines_dpdk_probe failed\n");
         return EXIT_FAILURE;
     }
@@ -2017,7 +2080,7 @@ main(int argc, char **argv)
 	/* clean up the EAL */
 	rte_eal_cleanup();
 	l3fwd_doca_pipelines_cleanup();
-	
+
 	printf("Bye...\n");
 
 	return ret;

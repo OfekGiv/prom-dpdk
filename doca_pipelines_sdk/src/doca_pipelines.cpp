@@ -139,8 +139,15 @@ static doca_error_t open_doca_dev_by_pci(const char *pci_addr, struct doca_dev *
     return DOCA_ERROR_NOT_FOUND;
 }
 
-int doca_pipelines_dpdk_probe(const char *pci_bdf)
+int doca_pipelines_dpdk_probe(const char *pci_bdf, const char *extra_devargs)
 {
+
+    std::string devargs = "dv_flow_en=2";
+    if (extra_devargs != nullptr && extra_devargs[0] != '\0') {
+	devargs += ",";
+	devargs += extra_devargs;
+    }
+
     if (g_doca_dpdk_port_probed) {
         return 0;
     }
@@ -153,7 +160,7 @@ int doca_pipelines_dpdk_probe(const char *pci_bdf)
     RTE_LOG(INFO, DOCA_PIPELINES, "DOCA: probing DPDK bridge for PCI %s\n", pci_bdf);
 
     if (ethdev_exists_for_pci_bdf(pci_bdf)) {
-        RTE_LOG(ERR, DOCA_PIPELINES, 
+        RTE_LOG(ERR, DOCA_PIPELINES,
             "DOCA: DPDK already has rte_eth for %s — use EAL -a pci:00:00.0 -a auxiliary: \n"
             "and do not whitelist the dataplane PF",
             pci_bdf);
@@ -170,7 +177,8 @@ int doca_pipelines_dpdk_probe(const char *pci_bdf)
     g_doca_probe_dev = dev;
     g_doca_probe_dev_owned = true;
 
-    res = doca_dpdk_port_probe(g_doca_probe_dev, "dv_flow_en=2");
+
+    res = doca_dpdk_port_probe(g_doca_probe_dev, devargs.c_str());
     if (res != DOCA_SUCCESS) {
         RTE_LOG(ERR, DOCA_PIPELINES, "DOCA probe: doca_dpdk_port_probe failed: %s\n", doca_error_get_descr(res));
         (void)doca_dev_close(g_doca_probe_dev);

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-int l3fwd_doca_pipelines_dpdk_probe(const char *pci_bdf);
+int l3fwd_doca_pipelines_dpdk_probe(const char *pci_bdf, const char *extra_devargs);
 int l3fwd_doca_pipelines_init(uint16_t nb_queues);
 void l3fwd_doca_pipelines_cleanup(void);
 
