@@ -51,6 +51,7 @@ dts/test_run.yaml
 # ignore default build directory, and directories from test-meson-builds.sh
 build
 build-*
+install-*
 # ignore other build directory patterns
 *-gcc*
 *-clang*

@@ -300,6 +300,22 @@ MLX5_TXOFF_PRE_DECL(mci_mpw);
 MLX5_TXOFF_PRE_DECL(mc_mpw);
 MLX5_TXOFF_PRE_DECL(i_mpw);
 
+static __rte_always_inline bool
+mlx5_tx_debug_get_esp_sn(const struct rte_mbuf *mbuf, uint32_t *esp_sn)
+{
+	uint8_t * seq_be_p;
+	uint8_t seq_be[0x3B] = {0};
+
+	if (unlikely(mbuf == NULL || esp_sn == NULL))
+		return false;
+	seq_be_p = (uint8_t*)rte_pktmbuf_read(mbuf, 0, 1, &seq_be);
+	if (unlikely(seq_be_p == NULL))
+		return false;
+	printf("0x%02x\n", seq_be_p[0]);
+	*esp_sn = (uint32_t)seq_be_p[0];
+	return true;
+}
+
 static __rte_always_inline struct mlx5_uar_data *
 mlx5_tx_bfreg(struct mlx5_txq_data *txq)
 {
@@ -3478,6 +3494,11 @@ single_part_inline:
 			 * - Data Segment, pointer type
 			 */
 single_no_inline:
+			if (unlikely(rte_trace_is_enabled())) {
+				uint32_t seq_num = 0;
+				mlx5_tx_debug_get_esp_sn(loc->mbuf, &seq_num);
+				mu_trace_tx_lcore(rte_lcore_id(), txq->idx, seq_num, txq->wqe_ci, txq->wqe_pi);
+			}
 			wqe = txq->wqes + (txq->wqe_ci & txq->wqe_m);
 			loc->wqe_last = wqe;
 			mlx5_tx_cseg_init(txq, loc, wqe, 3,
@@ -3492,6 +3513,7 @@ single_no_inline:
 			//--loc->wqe_free;
 			txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
 			loc->wqe_free -= MLX5_MU_WQE_SIZE << log_group_size;
+			printf("core=%d, txq->wqe_ci=%d, loc->wqe_free=%d\n", rte_lcore_id(), txq->wqe_ci, loc->wqe_free);
 
 			// Prepare doorbell ring
 			txq->uar_doorbell = *(uint64_t *)&loc->wqe_last->cseg;
@@ -3500,7 +3522,8 @@ single_no_inline:
 			txq->uar_doorbell = ((uint64_t)rte_cpu_to_be_32(txq->qp_num_8s) << 32) | txq->uar_doorbell;
 			// Set the updated CI to the doorbell ring
 			txq->uar_doorbell = txq->uar_doorbell & 0x00FFFFFFFF0000FF;
-			uint8_t ds = (uint8_t)(MLX5_MU_WQE_SIZE << 2);
+			//uint8_t ds = (uint8_t)(MLX5_MU_WQE_SIZE << 2);
+			uint8_t ds = 3;
 			txq->uar_doorbell = ((uint64_t)ds << 56) | ((uint64_t)rte_cpu_to_be_16(txq->wqe_ci - MLX5_MU_WQE_SIZE) << 8) | txq->uar_doorbell;
 
 			/*

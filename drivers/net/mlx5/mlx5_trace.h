@@ -109,10 +109,12 @@ RTE_TRACE_POINT_FP(
 RTE_TRACE_POINT_FP(
 	mu_trace_tx_lcore,
 	RTE_TRACE_POINT_ARGS(uint32_t lcore_id, uint16_t queue_id,
-			     uint32_t esp_seq),
+			     uint32_t esp_seq, uint32_t wqe_ci, uint32_t wqe_pi),
 	rte_trace_point_emit_u32(lcore_id);
 	rte_trace_point_emit_u16(queue_id);
 	rte_trace_point_emit_u32(esp_seq);
+	rte_trace_point_emit_u32(wqe_ci);
+	rte_trace_point_emit_u32(wqe_pi);
 )
 
 #ifdef __cplusplus

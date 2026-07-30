@@ -1,6 +1,14 @@
-meson setup build-doca-w-debug --prefix=/homes/ofekdg/prom-dpdk/install-w-debug --buildtype=debug -Ddefault_library=shared -Dexamples=l3fwd
+# Huge pages
+echo 1024 | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+echo 1024 | sudo tee /sys/devices/system/node/node1/hugepages/hugepages-2048kB/nr_hugepages
 
+# Install DPDK
+meson setup build-doca-w-debug --prefix=/homes/ofekdg/prom-dpdk/install-w-debug --buildtype=debug -Ddefault_library=shared -Dexamples=l3fwd
 ninja -C build-doca-w-debug
 ninja -C build-doca-w-debug install
 
-sudo env -i  LD_LIBRARY_PATH=/homes/ofekdg/prom-dpdk/install-w-debug/lib/x86_64-linux-gnu:/homes/ofekdg/prom-dpdk/install-w-debug/lib/x86_64-linux-gnu/dpdk/pmds-26.0:/homes/ofekdg/prom-dpdk/doca_pipelines_sdk/lib/x86_64-linux-gnu:/opt/rdma-private/lib/x86_64-linux-gnu   gdb --args /homes/ofekdg/prom-dpdk/build-doca-w-debug/examples/dpdk-l3fwd     -l 1-4 -n 4     -a 0000:17:00.1,mu_sq_log_grp_size=2     --     -P     -p 0x1     --config="(0,0,1),(0,1,2),(0,2,3),(0,3,4)"     --rule_ipv4=/homes/ofekdg/Tests/l3fwd/ipv4_rule.db     --rule_ipv6=/homes/ofekdg/Tests/l3fwd/ipv6_rule.db     --queues 4
+# Run PROM with group size = 4
+sudo env -i LD_LIBRARY_PATH=/homes/ofekdg/prom-dpdk/install-w-debug/lib/x86_64-linux-gnu:/homes/ofekdg/prom-dpdk/install-w-debug/lib/x86_64-linux-gnu/dpdk/pmds-26.0:/homes/ofekdg/prom-dpdk/doca_pipelines_sdk/lib/x86_64-linux-gnu:/opt/rdma-private/lib/x86_64-linux-gnu gdb --args /homes/ofekdg/prom-dpdk/build-doca-w-debug/examples/dpdk-l3fwd -l 1-4 -n 4 -a 0000:17:00.1,mu_sq_log_grp_size=2 --trace=pmd.net.mlx5.rx.lcore --trace=pmd.net.mlx5.tx.lcore --trace-dir=/homes/ofekdg/prom-traces -- -P -p 0x1 --config="(0,0,1),(0,1,2),(0,2,3),(0,3,4)" --rule_ipv4=/homes/ofekdg/Tests/l3fwd/ipv4_rule.db --rule_ipv6=/homes/ofekdg/Tests/l3fwd/ipv6_rule.db --queues 4
+
+# Run PROM with group size = 2
+sudo env -i LD_LIBRARY_PATH=/homes/ofekdg/prom-dpdk/install-w-debug/lib/x86_64-linux-gnu:/homes/ofekdg/prom-dpdk/install-w-debug/lib/x86_64-linux-gnu/dpdk/pmds-26.0:/homes/ofekdg/prom-dpdk/doca_pipelines_sdk/lib/x86_64-linux-gnu:/opt/rdma-private/lib/x86_64-linux-gnu gdb --args /homes/ofekdg/prom-dpdk/build-doca-w-debug/examples/dpdk-l3fwd -l 1-2 -n 4 -a 0000:17:00.1,mu_sq_log_grp_size=1 --trace=pmd.net.mlx5.rx.lcore --trace=pmd.net.mlx5.tx.lcore --trace-dir=/homes/ofekdg/prom-traces -- -P -p 0x1 --config="(0,0,1),(0,1,2)" --rule_ipv4=/homes/ofekdg/Tests/l3fwd/ipv4_rule.db --rule_ipv6=/homes/ofekdg/Tests/l3fwd/ipv6_rule.db --queues 2
