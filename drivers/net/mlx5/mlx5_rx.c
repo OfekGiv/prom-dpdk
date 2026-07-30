@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include <eal_export.h>
 #include <rte_mbuf.h>
@@ -14,8 +15,11 @@
 #include <rte_common.h>
 #include <rte_branch_prediction.h>
 #include <rte_ether.h>
+#include <rte_ip.h>
 #include <rte_cycles.h>
 #include <rte_flow.h>
+#include <rte_lcore.h>
+#include <rte_trace_point.h>
 
 #include <mlx5_prm.h>
 #include <mlx5_common.h>
@@ -29,6 +33,7 @@
 #include "mlx5_rxtx.h"
 #include "mlx5_devx.h"
 #include "mlx5_rx.h"
+#include "mlx5_trace.h"
 #ifdef HAVE_MLX5_MSTFLINT
 #include <mstflint/mtcr.h>
 #endif
@@ -62,6 +67,71 @@ mlx5_lro_update_hdr(uint8_t *__rte_restrict padd,
 		    volatile struct mlx5_cqe *__rte_restrict cqe,
 		    volatile struct mlx5_mini_cqe8 *mcqe,
 		    struct mlx5_rxq_data *rxq, uint32_t len);
+
+static __rte_always_inline bool
+mlx5_rx_debug_get_esp_sn(const struct rte_mbuf *mbuf, uint32_t *esp_sn)
+{
+	struct rte_ether_hdr eth_storage;
+	struct rte_vlan_hdr vlan_storage;
+	struct rte_ipv4_hdr ip4_storage;
+	uint8_t esp_hdr[8];
+	const struct rte_ether_hdr *eth;
+	const struct rte_vlan_hdr *vlan;
+	const struct rte_ipv4_hdr *ip4;
+	const uint8_t *esp;
+	uint16_t ether_type;
+	uint32_t l2_len;
+	uint32_t ip4_hdr_len;
+
+	if (unlikely(mbuf == NULL || esp_sn == NULL))
+		return false;
+	eth = rte_pktmbuf_read(mbuf, 0, sizeof(eth_storage), &eth_storage);
+	if (unlikely(eth == NULL))
+		return false;
+	l2_len = sizeof(struct rte_ether_hdr);
+	ether_type = rte_be_to_cpu_16(eth->ether_type);
+	while ((ether_type == RTE_ETHER_TYPE_VLAN ||
+		ether_type == RTE_ETHER_TYPE_QINQ) &&
+	       l2_len <= sizeof(struct rte_ether_hdr) + 2 * sizeof(struct rte_vlan_hdr)) {
+		vlan = rte_pktmbuf_read(mbuf, l2_len, sizeof(vlan_storage), &vlan_storage);
+		if (unlikely(vlan == NULL))
+			return false;
+		ether_type = rte_be_to_cpu_16(vlan->eth_proto);
+		l2_len += sizeof(struct rte_vlan_hdr);
+	}
+	if (ether_type != RTE_ETHER_TYPE_IPV4)
+		return false;
+	ip4 = rte_pktmbuf_read(mbuf, l2_len, sizeof(ip4_storage), &ip4_storage);
+	if (unlikely(ip4 == NULL))
+		return false;
+	if (ip4->next_proto_id != IPPROTO_ESP)
+		return false;
+	ip4_hdr_len = (uint32_t)(ip4->version_ihl & RTE_IPV4_HDR_IHL_MASK) *
+		      RTE_IPV4_IHL_MULTIPLIER;
+	if (unlikely(ip4_hdr_len < sizeof(struct rte_ipv4_hdr)))
+		return false;
+	esp = rte_pktmbuf_read(mbuf, l2_len + ip4_hdr_len, sizeof(esp_hdr),
+			       esp_hdr);
+	if (esp == NULL)
+		return false;
+	memcpy(esp_sn, esp + sizeof(uint32_t), sizeof(*esp_sn));
+	*esp_sn = rte_be_to_cpu_32(*esp_sn);
+	return true;
+}
+
+static __rte_always_inline void
+mlx5_rx_trace_esp_sn(const struct mlx5_rxq_data *rxq,
+		     const struct rte_mbuf *pkt)
+{
+	uint32_t esp_sn;
+
+	if (unlikely(!__rte_trace_point_fp_is_enabled()))
+		return;
+	if (!mlx5_rx_debug_get_esp_sn(pkt, &esp_sn))
+		return;
+	rte_pmd_mlx5_trace_rx_esp_sn(rte_lcore_id(),
+				     rxq->idx, esp_sn);
+}
 
 
 /**
@@ -1149,6 +1219,26 @@ mlx5_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 		/* Increment bytes counter. */
 		rxq->stats.ibytes += PKT_LEN(pkt);
 #endif
+		/*
+		if (pkt->ol_flags & RTE_MBUF_DYNFLAG_RX_METADATA) {
+			uint32_t esp_seq = *RTE_FLOW_DYNF_METADATA(pkt);
+			printf("RX: Lcore %u: Processing packet with RX metadata, esp_seq=%u\n",
+					rte_lcore_id(), esp_seq);
+		}
+		else {
+			uint32_t esp_seq = *RTE_FLOW_DYNF_METADATA(pkt);
+			printf("RX: packet has no RX metadata. ol_flags = 0x%x, esp_seq=%u\n", pkt->ol_flags, esp_seq);
+		}
+		*/
+		if (unlikely(rte_trace_is_enabled())) {
+			uint32_t esp_sn;
+			if (pkt->ol_flags & RTE_MBUF_DYNFLAG_RX_METADATA) {
+				uint32_t esp_seq = *RTE_FLOW_DYNF_METADATA(pkt);
+				mu_trace_rx_lcore(rte_lcore_id(), rxq->idx, esp_seq);
+			}	
+		}
+			
+
 		/* Return packet. */
 		*(pkts++) = pkt;
 		pkt = NULL;

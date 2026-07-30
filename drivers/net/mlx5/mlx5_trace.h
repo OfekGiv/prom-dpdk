@@ -70,6 +70,13 @@ RTE_TRACE_POINT_FP(
 )
 
 RTE_TRACE_POINT_FP(
+	mu_trace_wqe_free,
+	RTE_TRACE_POINT_ARGS(uint16_t wqe_free, uint16_t elts_free),
+	rte_trace_point_emit_u16(wqe_free);
+	rte_trace_point_emit_u16(elts_free);
+)
+
+RTE_TRACE_POINT_FP(
 	mu_trace_db_ring,
 	RTE_TRACE_POINT_ARGS(
 		uint16_t sq_idx,
@@ -88,6 +95,24 @@ RTE_TRACE_POINT_FP(
 	rte_trace_point_emit_u16(wqe_index);
 	rte_trace_point_emit_u8(ds);
 	rte_trace_point_emit_u32(sq_number);
+)
+
+RTE_TRACE_POINT_FP(
+	mu_trace_rx_lcore,
+	RTE_TRACE_POINT_ARGS(uint32_t lcore_id, uint16_t queue_id,
+		 					uint32_t esp_sn),
+	rte_trace_point_emit_u32(lcore_id);
+	rte_trace_point_emit_u16(queue_id);
+	rte_trace_point_emit_u32(esp_sn);
+)
+
+RTE_TRACE_POINT_FP(
+	mu_trace_tx_lcore,
+	RTE_TRACE_POINT_ARGS(uint32_t lcore_id, uint16_t queue_id,
+			     uint32_t esp_seq),
+	rte_trace_point_emit_u32(lcore_id);
+	rte_trace_point_emit_u16(queue_id);
+	rte_trace_point_emit_u32(esp_seq);
 )
 
 #ifdef __cplusplus

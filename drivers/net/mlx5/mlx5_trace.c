@@ -26,3 +26,12 @@ RTE_TRACE_POINT_REGISTER(rte_pmd_mlx5_trace_tx_complete,
 
 RTE_TRACE_POINT_REGISTER(mu_trace_db_ring,
 	pmd.net.mlx5.db.ring)
+
+RTE_TRACE_POINT_REGISTER(mu_trace_wqe_free,
+pmd.net.mlx5.wqe.free)
+
+RTE_TRACE_POINT_REGISTER(mu_trace_rx_lcore,
+	pmd.net.mlx5.rx.lcore)
+
+RTE_TRACE_POINT_REGISTER(mu_trace_tx_lcore,
+	pmd.net.mlx5.tx.lcore)
