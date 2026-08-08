@@ -50,11 +50,9 @@ tx_recover_qp(struct mlx5_txq_ctrl *txq_ctrl)
 		if (mlx5_queue_state_modify(ETH_DEV(txq_ctrl->priv), &sm))
 			return -1;
 	}
-	for(int i = 0; i < txq_ctrl->priv->txqs_n; i++){
-		txq_ctrl->txq.wqe_ci = MLX5_MU_WQE_SIZE * i;
-		txq_ctrl->txq.wqe_pi = 0;
-		txq_ctrl->txq.elts_comp = 0;
-	}
+	txq_ctrl->txq.wqe_ci = 0;
+	txq_ctrl->txq.wqe_pi = 0;
+	txq_ctrl->txq.elts_comp = 0;
 	return 0;
 }
 
