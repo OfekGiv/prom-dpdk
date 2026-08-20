@@ -300,6 +300,7 @@ MLX5_TXOFF_PRE_DECL(mci_mpw);
 MLX5_TXOFF_PRE_DECL(mc_mpw);
 MLX5_TXOFF_PRE_DECL(i_mpw);
 
+
 static __rte_always_inline bool
 mlx5_tx_debug_get_esp_sn(const struct rte_mbuf *mbuf, uint32_t *esp_sn)
 {
@@ -308,11 +309,12 @@ mlx5_tx_debug_get_esp_sn(const struct rte_mbuf *mbuf, uint32_t *esp_sn)
 
 	if (unlikely(mbuf == NULL || esp_sn == NULL))
 		return false;
-	seq_be_p = (uint8_t*)rte_pktmbuf_read(mbuf, 0, 1, &seq_be);
+	seq_be_p = (uint8_t*)rte_pktmbuf_read(mbuf, 42, 4, &seq_be);
 	if (unlikely(seq_be_p == NULL))
 		return false;
-	printf("0x%02x\n", seq_be_p[0]);
-	*esp_sn = (uint32_t)seq_be_p[0];
+	*esp_sn = ((uint32_t)seq_be_p[0] << 24) | ((uint32_t)seq_be_p[1] << 16) |
+          ((uint32_t)seq_be_p[2] << 8)  |  (uint32_t)seq_be_p[3];
+	//*esp_sn = (uint32_t)seq_be_p[0];
 	return true;
 }
 

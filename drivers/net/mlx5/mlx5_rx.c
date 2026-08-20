@@ -68,6 +68,7 @@ mlx5_lro_update_hdr(uint8_t *__rte_restrict padd,
 		    volatile struct mlx5_mini_cqe8 *mcqe,
 		    struct mlx5_rxq_data *rxq, uint32_t len);
 
+
 static __rte_always_inline bool
 mlx5_rx_debug_get_esp_sn(const struct rte_mbuf *mbuf, uint32_t *esp_sn)
 {
@@ -76,11 +77,12 @@ mlx5_rx_debug_get_esp_sn(const struct rte_mbuf *mbuf, uint32_t *esp_sn)
 
 	if (unlikely(mbuf == NULL || esp_sn == NULL))
 		return false;
-	seq_be_p = (uint8_t*)rte_pktmbuf_read(mbuf, 49, 1, &seq_be);
+	seq_be_p = (uint8_t*)rte_pktmbuf_read(mbuf, 42, 4, &seq_be);
 	if (unlikely(seq_be_p == NULL))
 		return false;
-	printf("0x%02x\n", seq_be_p[0]);
-	*esp_sn = (uint32_t)seq_be_p[0];
+	*esp_sn = ((uint32_t)seq_be_p[0] << 24) | ((uint32_t)seq_be_p[1] << 16) |
+          ((uint32_t)seq_be_p[2] << 8)  |  (uint32_t)seq_be_p[3];
+	//*esp_sn = (uint32_t)seq_be_p[0];
 	return true;
 }
 
