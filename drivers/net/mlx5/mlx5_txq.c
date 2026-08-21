@@ -915,6 +915,20 @@ txq_set_params(struct mlx5_txq_ctrl *txq_ctrl)
 		inlen_send = 0;
 		inlen_empw = 0;
 	}
+	if (config->mu_sq_log_grp_size) {
+		/*
+		 * Multi-user SQ striping assumes every WQE occupies exactly
+		 * one WQEBB (see MLX5_MU_WQE_SIZE) so the shared ring can be
+		 * split into fixed per-slave columns. Only the no-inline
+		 * single-send and EMPW-simple paths honor that invariant;
+		 * every inline/TSO/multi-segment WQE builder advances
+		 * wqe_ci without the group_size scaling and would silently
+		 * overwrite a sibling slave's slot. Force those paths off.
+		 */
+		inlen_send = 0;
+		inlen_mode = 0;
+		inlen_empw = 0;
+	}
 	txq_ctrl->txq.inlen_send = inlen_send;
 	txq_ctrl->txq.inlen_mode = inlen_mode;
 	txq_ctrl->txq.inlen_empw = 0;
