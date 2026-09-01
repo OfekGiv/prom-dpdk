@@ -2077,10 +2077,16 @@ main(int argc, char **argv)
 	/* clean up config file routes */
 	l3fwd_lkp.free_routes();
 
-	/* clean up the EAL */
-	rte_eal_cleanup();
+	/*
+	 * DOCA resources were the last thing set up (after EAL and port start),
+	 * so tear them down first, in reverse order, before rte_eal_cleanup()
+	 * invalidates the device context they're still holding handles into.
+	 */
 	l3fwd_doca_pipelines_cleanup();
 
+	/* clean up the EAL */
+	rte_eal_cleanup();
+	
 	printf("Bye...\n");
 
 	return ret;
