@@ -125,6 +125,9 @@ BasicPipeBuilder &BasicPipeBuilder::root(bool v)                              { 
 BasicPipeBuilder &BasicPipeBuilder::domain(enum doca_flow_pipe_domain d)      { domain_  = d;   return *this; }
 BasicPipeBuilder &BasicPipeBuilder::match(MatchSpec m)                        { match_   = m;   return *this; }
 BasicPipeBuilder &BasicPipeBuilder::action(ActionSetMeta a)                   { actions_.push_back(a); return *this; }
+BasicPipeBuilder &BasicPipeBuilder::action(ActionSetPktMeta a)                { set_pkt_meta_ = a; return *this; }
+BasicPipeBuilder &BasicPipeBuilder::action(ActionCopyEspSnToMeta)             { copy_esp_sn_to_meta_ = true; return *this; }
+BasicPipeBuilder &BasicPipeBuilder::decap(ActionDecap a)                      { decap_ = a; return *this; }
 BasicPipeBuilder &BasicPipeBuilder::no_monitor()                              { monitor_ = false; return *this; }
 BasicPipeBuilder &BasicPipeBuilder::no_actions_template()                     { null_actions_template_ = true; return *this; }
 BasicPipeBuilder &BasicPipeBuilder::fwd(FwdSpec f)                            { fwd_  = f; return *this; }
@@ -172,18 +175,78 @@ doca_error_t BasicPipeBuilder::build_pipe(struct doca_flow_port *port,
                 match.parser_meta.outer_l4_type                = DOCA_FLOW_L4_META_UDP;
                 match_mask.outer.udp.l4_port.dst_port          = 0xFFFF;
                 has_mask = true;
+            } else if constexpr (std::is_same_v<T, MatchIPv4ESP>) {
+                match.parser_meta.outer_l3_type = DOCA_FLOW_L3_META_IPV4;
+                match.parser_meta.outer_l4_type = DOCA_FLOW_L4_META_ESP;
+            } else if constexpr (std::is_same_v<T, MatchEspSnMasked>) {
+                /* Partial-mask match on the ESP Sequence Number (cleartext by
+                 * RFC 4303, no bound crypto/SA resource needed -- same
+                 * mechanism as VXLAN VNI / GRE key matching). Template marks
+                 * the field changeable; mask restricts the comparison to the
+                 * lower log2(N) bits for power-of-2 RR, same pattern as
+                 * MatchMetaMasked but on a TX-assigned field instead of a
+                 * NIC-computed one. */
+                match.tun.type               = DOCA_FLOW_TUN_ESP;
+                match.tun.esp_sn             = 0xffffffffu;
+                match_mask.tun.type          = DOCA_FLOW_TUN_ESP;
+                match_mask.tun.esp_sn        = rte_cpu_to_be_32(m.mask);
+                has_mask = true;
+            } else if constexpr (std::is_same_v<T, MatchPktMetaMasked>) {
+                match.meta.pkt_meta      = 0xffffffffu;
+                match_mask.meta.pkt_meta = rte_cpu_to_be_32(m.mask);
+                has_mask = true;
             }
         }, *match_);
     }
 
     /* --- Actions --- */
-    struct doca_flow_actions              actions    = {};
+    struct doca_flow_actions              actions      = {};
     struct doca_flow_actions             *actions_arr[1] = {&actions};
+    struct doca_flow_actions              actions_mask = {};
+    struct doca_flow_actions             *actions_mask_arr[1] = {&actions_mask};
     struct doca_flow_action_descs         descs      = {};
     struct doca_flow_action_descs        *descs_arr[1] = {&descs};
+    struct doca_flow_action_desc          copy_desc  = {};
 
     for (const auto &a : actions_) {
         actions.meta.u32[a.u32_index] = rte_cpu_to_be_32(a.value);
+    }
+
+    if (set_pkt_meta_.has_value()) {
+        /* DIAGNOSTIC: same literal-value pattern as ActionSetMeta above,
+         * just targeting pkt_meta -- no action_desc/mask needed since this
+         * is a constant, not a copy. */
+        actions.meta.pkt_meta = rte_cpu_to_be_32(set_pkt_meta_->value);
+    }
+
+    if (copy_esp_sn_to_meta_) {
+        /*
+         * Mark the destination as an active/changeable action field via the
+         * actions MASK (mirroring the match/match_mask convention) -- unlike
+         * ActionSetMeta, the COPY destination's actual value comes from the
+         * action_desc below, not a literal in `actions` itself, so `actions`
+         * must NOT also carry a value for this field (that would conflict
+         * with the copy and was confirmed to fail entry-add with
+         * DOCA_ERROR_INVALID_VALUE during hardware testing).
+         */
+        actions_mask.meta.pkt_meta = 0xffffffffu;
+        /* UNVERIFIED source field_string -- see ActionCopyEspSnToMeta's doc
+         * comment in pipe_builder.hpp. */
+        copy_desc.type                      = DOCA_FLOW_ACTION_COPY;
+        copy_desc.field_op.src.field_string = "tunnel.esp.sn";
+        copy_desc.field_op.src.bit_offset   = 0;
+        copy_desc.field_op.dst.field_string = "meta.data";
+        copy_desc.field_op.dst.bit_offset   = 0; /* meta.pkt_meta precedes u32[]: offset 0 */
+        copy_desc.field_op.width            = 32;
+        descs.desc_array   = &copy_desc;
+        descs.nb_action_desc = 1;
+    }
+
+    if (decap_.has_value()) {
+        /* UNVERIFIED -- see ActionDecap's doc comment in pipe_builder.hpp. */
+        actions.decap_type          = DOCA_FLOW_RESOURCE_TYPE_NON_SHARED;
+        actions.decap_cfg.is_l2     = decap_->is_l2;
+        actions.decap_cfg.eth       = decap_->eth;
     }
 
     /* --- Monitor --- */
@@ -243,7 +306,8 @@ doca_error_t BasicPipeBuilder::build_pipe(struct doca_flow_port *port,
     }
     result = doca_flow_pipe_cfg_set_actions(guard.cfg,
                                             null_actions_template_ ? nullptr : actions_arr,
-                                            nullptr, descs_arr, 1);
+                                            copy_esp_sn_to_meta_ ? actions_mask_arr : nullptr,
+                                            descs_arr, 1);
     LB_PB_CKV("set_actions");
     result = doca_flow_pipe_create(guard.cfg, &pipe_fwd, &pipe_miss, out_pipe);
     LB_PB_CKV("pipe_create");
@@ -328,6 +392,8 @@ doca_error_t BasicPipeBuilder::build_per_queue(struct doca_flow_port *port,
     /* Determine meta match index for per-entry match population. */
     int  meta_match_idx      = -1;
     bool meta_match_needs_l3 = false;
+    bool is_esp_sn_match     = false;
+    bool is_pkt_meta_match   = false;
     if (match_.has_value()) {
         if (std::holds_alternative<MatchIPv4Meta>(*match_)) {
             meta_match_idx      = std::get<MatchIPv4Meta>(*match_).u32_index;
@@ -338,6 +404,10 @@ doca_error_t BasicPipeBuilder::build_per_queue(struct doca_flow_port *port,
         } else if (std::holds_alternative<MatchMetaMasked>(*match_)) {
             meta_match_idx      = std::get<MatchMetaMasked>(*match_).u32_index;
             meta_match_needs_l3 = false;  /* meta-only with partial mask; entry value = queue index */
+        } else if (std::holds_alternative<MatchEspSnMasked>(*match_)) {
+            is_esp_sn_match = true;       /* entry value = queue index, on tun.esp_sn */
+        } else if (std::holds_alternative<MatchPktMetaMasked>(*match_)) {
+            is_pkt_meta_match = true;     /* entry value = queue index, on meta.pkt_meta */
         }
     }
 
@@ -360,6 +430,11 @@ doca_error_t BasicPipeBuilder::build_per_queue(struct doca_flow_port *port,
                 entry_match.parser_meta.outer_l3_type = DOCA_FLOW_L3_META_IPV4;
             entry_match.meta.u32[meta_match_idx] =
                 rte_cpu_to_be_32(static_cast<uint32_t>(q));
+        } else if (is_esp_sn_match) {
+            entry_match.tun.type   = DOCA_FLOW_TUN_ESP;
+            entry_match.tun.esp_sn = rte_cpu_to_be_32(static_cast<uint32_t>(q));
+        } else if (is_pkt_meta_match) {
+            entry_match.meta.pkt_meta = rte_cpu_to_be_32(static_cast<uint32_t>(q));
         }
 
         /* Per-entry fwd. */

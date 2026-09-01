@@ -127,6 +127,21 @@ struct __rte_cache_aligned mlx5_txq_data {
 	uint16_t wqe_group_thres; /* Offset theshold for wrap-around. */
 	uint16_t wqe_comp; /* WQE index since last completion request. */
 	uint16_t wqe_thres; /* WQE threshold to request completion in CQ. */
+	/*
+	 * mu_sq ESP-seq indexed placement (see mlx5_tx_burst_single_send's
+	 * single_no_inline path): mu_next_row is the next seq-derived "row"
+	 * (esp_sn >> log_group_size) this lane expects to place contiguously.
+	 * Counters below are informational only -- never logged/printed from
+	 * the hot path, surfaced via mu_trace_tx_lcore/summarized at shutdown.
+	 * All are best-effort diagnostics for a feature not yet validated on
+	 * real hardware; treat any nonzero mu_nb_lane_mismatch as a serious
+	 * anomaly (see the hard safety-gate comment at the call site).
+	 */
+	uint32_t mu_next_row;
+	uint64_t mu_nb_meta_missing_fallback;
+	uint64_t mu_nb_lane_mismatch;
+	uint64_t mu_nb_late_drop;
+	uint64_t mu_nb_gap_fallback;
 	/* WQ related fields. */
 	uint16_t cq_ci; /* Consumer index for completion queue. */
 	uint16_t cq_pi; /* Production index for completion queue. */
@@ -315,6 +330,27 @@ mlx5_tx_debug_get_esp_sn(const struct rte_mbuf *mbuf, uint32_t *esp_sn)
 	*esp_sn = ((uint32_t)seq_be_p[0] << 24) | ((uint32_t)seq_be_p[1] << 16) |
           ((uint32_t)seq_be_p[2] << 8)  |  (uint32_t)seq_be_p[3];
 	//*esp_sn = (uint32_t)seq_be_p[0];
+	return true;
+}
+
+/*
+ * Read the ESP sequence number DOCA Flow copied into the HW metadata
+ * register (meta.pkt_meta), surfaced here via the generic DPDK flow
+ * dynfield mechanism (see rxq_cq_to_mbuf() in mlx5_rx.c, which populates
+ * this from cqe->flow_table_metadata once rte_flow_dynf_metadata_register()
+ * has been called -- see mlx5_trigger.c's mu_sq gating). This never touches
+ * packet payload -- mu_sq indexing must not, since mlx5 posts descriptors
+ * without reading packet data. Replaces mlx5_tx_debug_get_esp_sn's raw byte
+ * read above for anything that needs a trustworthy value, not just tracing.
+ */
+static __rte_always_inline bool
+mlx5_tx_get_esp_sn_from_meta(const struct rte_mbuf *mbuf, uint32_t *esp_sn)
+{
+	if (unlikely(mbuf == NULL || esp_sn == NULL))
+		return false;
+	if (unlikely((mbuf->ol_flags & RTE_MBUF_DYNFLAG_RX_METADATA) == 0))
+		return false;
+	*esp_sn = *RTE_FLOW_DYNF_METADATA(mbuf);
 	return true;
 }
 
@@ -3496,26 +3532,132 @@ single_part_inline:
 			 * - Data Segment, pointer type
 			 */
 single_no_inline:
-			if (unlikely(rte_trace_is_enabled())) {
-				uint32_t seq_num = 0;
-				mlx5_tx_debug_get_esp_sn(loc->mbuf, &seq_num);
-				mu_trace_tx_lcore(rte_lcore_id(), txq->idx, seq_num, txq->wqe_ci, txq->wqe_pi);
+		{
+			/*
+			 * mu_sq ESP-seq indexed placement. Goal: pick the WQE
+			 * slot from the packet's own ESP sequence number
+			 * (arrived via the mlx5 flow-metadata dynfield -- see
+			 * mlx5_tx_get_esp_sn_from_meta(), never packet payload)
+			 * instead of this lane's local send counter, so TX
+			 * order matches true seq order regardless of which
+			 * core processed which packet or in what order --
+			 * without trusting DOCA's own routing/arrival order to
+			 * be perfect.
+			 *
+			 * wqe_ci = (esp_sn * MLX5_MU_WQE_SIZE) & wqe_m is
+			 * algebraically identical to this lane's existing
+			 * fixed-stride address in the common/contiguous case
+			 * (DOCA's masked steering guarantees
+			 * esp_sn mod group_size == txq->idx), so the doorbell
+			 * and completion-side code below is completely
+			 * unchanged/unaffected there.
+			 *
+			 * Gap case (an intermediate seq for this lane hasn't
+			 * arrived yet) deliberately does NOT attempt to jump
+			 * ahead via speculative/NOP-filled WQEs: this
+			 * codebase's group-mode doorbell/wqe_counter encoding
+			 * (txq->wqe_ci - MLX5_MU_WQE_SIZE below) is not fully
+			 * understood/verified for that scenario, and getting
+			 * it wrong risks corrupting a real queue pair (see
+			 * git history's tx_recover_qp fix). Falling back to
+			 * today's already-proven fixed-stride placement for
+			 * that one send is the safe choice -- every WQE this
+			 * lane ever posts still goes through the exact same,
+			 * already-integrated addressing/doorbell path; only
+			 * this rare case (expected near-zero given esp_rr
+			 * steering's measured cleanliness) sacrifices strict
+			 * seq ordering rather than hardware safety.
+			 *
+			 * UNVALIDATED ON REAL HARDWARE -- see the plan's
+			 * validation section: start at group_size=2, watch
+			 * for tx_recover_qp events as a correctness alarm.
+			 */
+			uint32_t esp_sn = 0;
+			bool have_sn = mlx5_tx_get_esp_sn_from_meta(loc->mbuf, &esp_sn);
+			uint32_t wqe_stride = MLX5_MU_WQE_SIZE << log_group_size;
+			uint32_t target_wqe_ci = txq->wqe_ci; /* fallback: today's addressing */
+
+			/*
+			 * Every packet ALWAYS gets a WQE built at some address --
+			 * never skip/drop here. mlx5_tx_copy_elts() (the caller,
+			 * mlx5_tx_burst_single() in mlx5_tx.c) bulk-copies ALL
+			 * pkts_n mbuf pointers into txq->elts[] and advances
+			 * elts_head by the full count BEFORE this per-packet loop
+			 * even runs -- every packet in the batch is already
+			 * committed to a future completion-driven free. An
+			 * earlier version of this code called
+			 * rte_pktmbuf_free() directly for "unsafe to place"
+			 * packets (lane mismatch / late) and segfaulted during
+			 * hardware validation: that was a double-free (freed once
+			 * here, freed again later when elts[]'s bulk-recorded
+			 * pointer for a slot with no real WQE/completion behind
+			 * it gets processed). The only safe degradation here is
+			 * which ADDRESS to use, never whether to send at all.
+			 */
+			if (log_group_size != 0 && have_sn) {
+				if (unlikely((esp_sn & (((uint32_t)1 << log_group_size) - 1))
+					     != txq->idx)) {
+					/*
+					 * All lanes in a mu_sq group share the SAME
+					 * physical WQE buffer -- a lane's SQN doesn't
+					 * get its own address space, only its own
+					 * doorbell bookkeeping over a column of that
+					 * shared buffer. If this packet's slot would
+					 * belong to a DIFFERENT lane's column, do NOT
+					 * use the seq-derived address (that would
+					 * corrupt shared memory that lane owns) --
+					 * fall back to this lane's own fixed-stride
+					 * slot instead, always safely within this
+					 * lane's own column.
+					 */
+					txq->mu_nb_lane_mismatch++;
+				} else {
+					uint32_t row = esp_sn >> log_group_size;
+
+					if (row == txq->mu_next_row) {
+						/* Fast/common path. */
+						target_wqe_ci = (esp_sn * MLX5_MU_WQE_SIZE) & txq->wqe_m;
+					} else if (row < txq->mu_next_row) {
+						/* Late: this lane's own row tracking already
+						 * advanced past where this seq would go --
+						 * fall back to this lane's fixed-stride slot
+						 * rather than risk reusing an address this
+						 * lane may already have moved past. */
+						txq->mu_nb_late_drop++;
+					} else {
+						/* Gap -- see the block comment above. */
+						txq->mu_nb_gap_fallback++;
+					}
+				}
+			} else if (log_group_size != 0) {
+				/* Feature inactive for this packet (no metadata)
+				 * -- fixed-stride fallback. */
+				txq->mu_nb_meta_missing_fallback++;
 			}
-			wqe = txq->wqes + (txq->wqe_ci & txq->wqe_m);
+
+			/* Resync row tracking to wherever this send actually
+			 * landed (seq-derived or fallback address alike) so
+			 * the fast path can resume once traffic catches up. */
+			if (log_group_size != 0)
+				txq->mu_next_row = (target_wqe_ci >> log_group_size) + 1;
+
+			if (unlikely(rte_trace_is_enabled()))
+				mu_trace_tx_lcore(rte_lcore_id(), txq->idx,
+						   have_sn ? esp_sn : 0,
+						   target_wqe_ci, txq->wqe_pi);
+
+			wqe = txq->wqes + (target_wqe_ci & txq->wqe_m);
 			loc->wqe_last = wqe;
 			mlx5_tx_cseg_init(txq, loc, wqe, 3,
 					  MLX5_OPCODE_SEND, olx);
-			rte_pmd_mlx5_trace_tx_push(loc->mbuf, txq->wqe_ci);
+			rte_pmd_mlx5_trace_tx_push(loc->mbuf, target_wqe_ci);
 			mlx5_tx_eseg_none(txq, loc, wqe, olx);
 			mlx5_tx_dseg_ptr
 				(txq, loc, &wqe->dseg[0],
 				 rte_pktmbuf_mtod(loc->mbuf, uint8_t *),
 				 rte_pktmbuf_data_len(loc->mbuf), olx);
-			//++txq->wqe_ci;
-			//--loc->wqe_free;
-			txq->wqe_ci += MLX5_MU_WQE_SIZE << log_group_size;
-			loc->wqe_free -= MLX5_MU_WQE_SIZE << log_group_size;
-			//printf("core=%d, txq->wqe_ci=%d, loc->wqe_free=%d\n", rte_lcore_id(), txq->wqe_ci, loc->wqe_free);
+			txq->wqe_ci += wqe_stride;
+			loc->wqe_free -= wqe_stride;
 
 			// Prepare doorbell ring
 			txq->uar_doorbell = *(uint64_t *)&loc->wqe_last->cseg;
@@ -3525,7 +3667,6 @@ single_no_inline:
 			// Set the updated CI to the doorbell ring
 			txq->uar_doorbell = txq->uar_doorbell & 0x00FFFFFFFF0000FF;
 			uint8_t ds = (uint8_t)(MLX5_MU_WQE_SIZE << 2);
-			//uint8_t ds = 3;
 			txq->uar_doorbell = ((uint64_t)ds << 56) | ((uint64_t)rte_cpu_to_be_16(txq->wqe_ci - MLX5_MU_WQE_SIZE) << 8) | txq->uar_doorbell;
 
 			/*
@@ -3546,6 +3687,7 @@ single_no_inline:
 					sizeof(struct rte_vlan_hdr);
 #endif
 		}
+	}
 		++loc->pkts_sent;
 		--pkts_n;
 		if (unlikely(!pkts_n || !loc->elts_free || !loc->wqe_free))

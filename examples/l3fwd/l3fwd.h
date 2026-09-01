@@ -8,6 +8,8 @@
 #include <rte_ethdev.h>
 #include <rte_vect.h>
 #include <rte_acl.h>
+#include <rte_cycles.h>
+#include <rte_lcore.h>
 
 #define DO_RFC_1812_CHECKS
 
@@ -115,6 +117,43 @@ extern uint32_t max_pkt_len;
 
 extern uint32_t rx_burst_size;
 extern uint32_t mb_mempool_cache_size;
+
+/*
+ * Simulated per-packet processing cost, for load/throughput testing (e.g.
+ * comparing single-core vs mu_sq multi-core scaling under a controlled,
+ * artificial workload). 0 (default) disables it entirely -- no cost when
+ * not in use. Read once at startup from L3FWD_BUSY_WAIT_NS; see main.c.
+ */
+extern uint64_t g_busy_wait_ns;
+/* Cached rte_get_tsc_hz(), set once at startup so the busy-wait spin doesn't
+ * pay for a fresh lookup on every packet. */
+extern uint64_t g_tsc_hz;
+
+/*
+ * Real (non-`top`-inflated) per-lcore utilization telemetry: DPDK's
+ * /eal/lcore/usage endpoint requires the app to report which cycles were
+ * genuinely spent on work vs. idle polling (a polling app always looks like
+ * 100% CPU to the OS regardless of whether real packets are flowing). These
+ * two calls do that bookkeeping; see the rte_lcore_usage_cb registered in
+ * main.c and l3fwd_lpm.c's lpm_main_loop() for the call sites.
+ */
+void l3fwd_usage_loop_start(unsigned int lcore_id);
+void l3fwd_usage_add_busy_cycles(unsigned int lcore_id, uint64_t cycles);
+
+/* CPU-bound spin (never yields to the scheduler, unlike a sleep) for the
+ * simulated per-packet busy-wait above. */
+static inline void
+l3fwd_busy_wait_ns(uint64_t ns)
+{
+	uint64_t cycles, start;
+
+	if (ns == 0)
+		return;
+	cycles = (ns * g_tsc_hz) / 1000000000ULL;
+	start = rte_rdtsc();
+	while ((rte_rdtsc() - start) < cycles)
+		rte_pause();
+}
 
 /* Send burst of packets on an output interface */
 static inline int

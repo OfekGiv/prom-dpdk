@@ -163,6 +163,7 @@ lpm_main_loop(__rte_unused void *dummy)
 
 	lcore_id = rte_lcore_id();
 	qconf = &lcore_conf[lcore_id];
+	l3fwd_usage_loop_start(lcore_id);
 
 	const uint16_t n_rx_q = qconf->n_rx_queue;
 	const uint16_t n_tx_p = qconf->n_tx_port;
@@ -210,12 +211,31 @@ lpm_main_loop(__rte_unused void *dummy)
 		 * Read packet from RX queues
 		 */
 		for (i = 0; i < n_rx_q; ++i) {
+			uint64_t busy_start_tsc;
+
 			portid = qconf->rx_queue_list[i].port_id;
 			queueid = qconf->rx_queue_list[i].queue_id;
+			busy_start_tsc = rte_rdtsc();
 			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
 				rx_burst_size);
 			if (nb_rx == 0)
 				continue;
+
+			/*
+			 * Simulated per-packet processing cost (load/throughput
+			 * testing only -- see L3FWD_BUSY_WAIT_NS in main.c).
+			 * Done here, once per packet in a plain loop, rather
+			 * than inside l3fwd_lpm_send_packets()/process_packet():
+			 * the x86 SIMD path batches 4 packets at a time and only
+			 * calls those per-packet, so a delay placed there would
+			 * scale with the ~0-3-packet burst remainder, not with
+			 * the actual packet count.
+			 */
+			if (unlikely(g_busy_wait_ns != 0)) {
+				int j;
+				for (j = 0; j < nb_rx; j++)
+					l3fwd_busy_wait_ns(g_busy_wait_ns);
+			}
 
 #if defined RTE_ARCH_X86 || defined __ARM_NEON \
 			 || defined RTE_ARCH_PPC_64
@@ -225,6 +245,8 @@ lpm_main_loop(__rte_unused void *dummy)
 			l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
 							portid, qconf);
 #endif /* X86 */
+			l3fwd_usage_add_busy_cycles(lcore_id,
+						     rte_rdtsc() - busy_start_tsc);
 		}
 
 		cur_tsc = rte_rdtsc();
@@ -250,6 +272,7 @@ lpm_main_loop(__rte_unused void *dummy)
 
 	lcore_id = rte_lcore_id();
 	qconf = &lcore_conf[lcore_id];
+	l3fwd_usage_loop_start(lcore_id);
 
 	const uint16_t n_rx_q = qconf->n_rx_queue;
 	const uint16_t n_tx_p = qconf->n_tx_port;

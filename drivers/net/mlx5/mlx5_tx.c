@@ -570,10 +570,26 @@ mlx5_select_tx_function(struct rte_eth_dev *dev)
 		}
 	}
 	if (config->mps == MLX5_MPW_ENHANCED &&
-	    config->txq_inline_min <= 0) {
+	    config->txq_inline_min <= 0 &&
+	    config->mu_sq_log_grp_size == 0) {
 		/*
 		 * The NIC supports Enhanced Multi-Packet Write
 		 * and does not require minimal inline data.
+		 *
+		 * Excluded under mu_sq: eMPW batches several packets into
+		 * one WQE/one doorbell, sharing txq->wqe_ci across the batch.
+		 * The mu_sq single_no_inline path picks wqe_ci from each
+		 * packet's own ESP sequence number (see mlx5_tx.h), which can
+		 * jump non-monotonically relative to a plain per-send stride
+		 * -- mlx5_tx_burst_empw_simple() still assumes the old
+		 * fixed-stride invariant and was NOT updated for this, since
+		 * per-packet seq-derived addressing doesn't map onto a
+		 * multi-packet-per-WQE batch without a batch-boundary
+		 * redesign. Reaching it with mu_sq's seq-derived wqe_ci
+		 * segfaulted during hardware validation (NULL-ish pointer
+		 * deref inside eMPW WQE construction) -- forcing EMPW off
+		 * here keeps every mu_sq packet on the single-send path that
+		 * was actually fixed for this.
 		 */
 		olx |= MLX5_TXOFF_CONFIG_EMPW;
 	}
@@ -581,11 +597,18 @@ mlx5_select_tx_function(struct rte_eth_dev *dev)
 		/* We should support Flow metadata. */
 		olx |= MLX5_TXOFF_CONFIG_METADATA;
 	}
-	if (config->mps == MLX5_MPW) {
+	if (config->mps == MLX5_MPW && config->mu_sq_log_grp_size == 0) {
 		/*
 		 * The NIC supports Legacy Multi-Packet Write.
 		 * The MLX5_TXOFF_CONFIG_MPW controls the descriptor building
 		 * method in combination with MLX5_TXOFF_CONFIG_EMPW.
+		 *
+		 * Excluded under mu_sq for the same reason as the Enhanced
+		 * MPW case above -- see that comment. (In practice mu_sq's
+		 * own dynf_metadata_avail()==true already sets METADATA above
+		 * and would exclude this branch via the existing METADATA
+		 * check below anyway, but an explicit guard here is clearer
+		 * and doesn't depend on that incidental interaction.)
 		 */
 		if (!(olx & (MLX5_TXOFF_CONFIG_TSO |
 			     MLX5_TXOFF_CONFIG_SWP |

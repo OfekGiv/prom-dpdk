@@ -42,6 +42,7 @@ pipeline_sources = files(
   'src/doca_pipelines/pipe_builder.cpp',
   'src/doca_pipelines/pipeline_graph.cpp',
   'src/doca_pipelines/doca_pipelines_meta_rr.cpp',
+  'src/doca_pipelines/doca_pipelines_esp_rr.cpp',
   'src/doca_pipelines_shim.cpp',
 )
 

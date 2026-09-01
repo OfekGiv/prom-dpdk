@@ -1551,6 +1551,25 @@ continue_dev_start:
 		SAVE_RTE_ERRNO_AND_STOP(ret, dev);
 		goto action_handle_detach;
 	}
+	/*
+	 * Multi-user SQ needs the generic DPDK flow-metadata dynfield so a
+	 * per-packet HW metadata-register value (e.g. an ESP sequence number
+	 * DOCA Flow copies into pkt_meta) survives from RX into the mbuf and
+	 * back out on TX (see rxq_cq_to_mbuf() in mlx5_rx.c and the metadata
+	 * WQE builders in mlx5_tx.h). Registering here -- driver-side, gated
+	 * on mu_sq being configured -- means no application code needs to
+	 * call rte_flow_dynf_metadata_register() itself. Must happen before
+	 * mlx5_flow_rxq_dynf_set() below, which only wires up
+	 * rxq->dynf_meta/flow_meta_mask/flow_meta_offset once
+	 * rte_flow_dynf_metadata_avail() is already true.
+	 */
+	if (dev->data->mu_sq_log_grp_size != 0 && !rte_flow_dynf_metadata_avail()) {
+		ret = rte_flow_dynf_metadata_register();
+		if (ret < 0)
+			DRV_LOG(WARNING,
+				"port %u mu_sq: rte_flow_dynf_metadata_register failed: %s",
+				dev->data->port_id, strerror(rte_errno));
+	}
 	/* Set dynamic fields and flags into Rx queues. */
 	mlx5_flow_rxq_dynf_set(dev);
 	/* Set flags and context to convert Rx timestamps. */

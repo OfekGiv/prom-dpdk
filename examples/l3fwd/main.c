@@ -62,6 +62,58 @@ uint32_t rx_burst_size = DEFAULT_PKT_BURST;
 uint32_t mb_mempool_cache_size = MEMPOOL_CACHE_SIZE;
 uint32_t tx_burst_size = DEFAULT_PKT_BURST;
 
+uint64_t g_busy_wait_ns;
+uint64_t g_tsc_hz;
+
+/*
+ * Per-lcore usage bookkeeping for the /eal/lcore/usage telemetry endpoint
+ * (see rte_lcore_register_usage_cb() below). total_cycles is derived at
+ * query time from loop_start_tsc; busy_cycles is accumulated incrementally
+ * by l3fwd_usage_add_busy_cycles() as real work happens (RX-with-packets +
+ * processing + any simulated busy-wait) -- idle polling (empty RX bursts)
+ * is never added, so the ratio reflects genuine utilization, unlike `top`
+ * which always shows 100% for a polling app regardless of real load.
+ */
+struct l3fwd_lcore_usage {
+	uint64_t loop_start_tsc;
+	uint64_t busy_cycles;
+};
+static struct l3fwd_lcore_usage lcore_usage[RTE_MAX_LCORE];
+
+void
+l3fwd_usage_loop_start(unsigned int lcore_id)
+{
+	if (lcore_id >= RTE_MAX_LCORE)
+		return;
+	__atomic_store_n(&lcore_usage[lcore_id].loop_start_tsc, rte_rdtsc(),
+			  __ATOMIC_RELAXED);
+}
+
+void
+l3fwd_usage_add_busy_cycles(unsigned int lcore_id, uint64_t cycles)
+{
+	if (lcore_id >= RTE_MAX_LCORE)
+		return;
+	__atomic_fetch_add(&lcore_usage[lcore_id].busy_cycles, cycles,
+			    __ATOMIC_RELAXED);
+}
+
+static int
+l3fwd_lcore_usage_cb(unsigned int lcore_id, struct rte_lcore_usage *usage)
+{
+	uint64_t start_tsc;
+
+	if (lcore_id >= RTE_MAX_LCORE)
+		return -1;
+
+	start_tsc = __atomic_load_n(&lcore_usage[lcore_id].loop_start_tsc,
+				     __ATOMIC_RELAXED);
+	usage->total_cycles = start_tsc ? rte_rdtsc() - start_tsc : 0;
+	usage->busy_cycles = __atomic_load_n(&lcore_usage[lcore_id].busy_cycles,
+					      __ATOMIC_RELAXED);
+	return 0;
+}
+
 /**< Ports set in promiscuous mode off by default. */
 static int promiscuous_on;
 
@@ -1980,6 +2032,23 @@ main(int argc, char **argv)
         l3fwd_doca_pipelines_cleanup();
         return EXIT_FAILURE;
     }
+
+	/*
+	 * L3FWD_BUSY_WAIT_NS: simulated per-packet processing cost, for
+	 * load/throughput testing. Read once here (not per-packet) --
+	 * unset/0 disables it entirely, matching this app's existing
+	 * env-var-toggle precedent in the DOCA pipelines SDK
+	 * (DOCA_PIPELINES_MODE).
+	 */
+	g_tsc_hz = rte_get_tsc_hz();
+	{
+		const char *busy_wait_env = getenv("L3FWD_BUSY_WAIT_NS");
+		g_busy_wait_ns = busy_wait_env ? strtoull(busy_wait_env, NULL, 10) : 0;
+		RTE_LOG(INFO, L3FWD, "simulated per-packet busy-wait: %" PRIu64 " ns "
+			"(L3FWD_BUSY_WAIT_NS=%s)\n", g_busy_wait_ns,
+			busy_wait_env ? busy_wait_env : "<unset>");
+	}
+	rte_lcore_register_usage_cb(l3fwd_lcore_usage_cb);
 
 	ret = 0;
 	/* launch per-lcore init on every lcore */

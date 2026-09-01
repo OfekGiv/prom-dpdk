@@ -107,4 +107,16 @@ doca_error_t doca_pipelines_probe_dynamic_aso_meta_indices(void);
  */
 doca_error_t doca_pipelines_run_meta_rr_pipeline(uint16_t queues);
 
+/**
+ * ESP sequence-number round-robin pipeline (pipeline_type "esp_rr").
+ *
+ * Steers on the IPsec ESP Sequence Number -- a TX-assigned, non-racy field --
+ * instead of a NIC-computed ASO counter, copies it into meta.pkt_meta so it
+ * reaches the mbuf on the DPDK side, and decaps the outer Ether+IP+ESP
+ * framing. Selected at runtime via DOCA_PIPELINES_MODE=esp_rr.
+ *
+ * queues must be a non-zero power of 2.
+ */
+doca_error_t doca_pipelines_run_esp_rr_pipeline(uint16_t queues);
+
 #endif /* DOCA_ASO_HPP */

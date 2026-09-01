@@ -300,14 +300,27 @@ int doca_pipelines_init(uint16_t nb_queues)
         return -1;
     }
 
-    result = doca_pipelines_run_meta_rr_pipeline(nb_q);
+    /*
+     * DOCA_PIPELINES_MODE selects the pipeline: "esp_rr" (IPsec ESP
+     * sequence-number steering, see doca_pipelines_esp_rr.cpp), or
+     * unset/anything else -> default meta_rr. Read here (not in
+     * examples/l3fwd) so pipeline selection stays entirely inside this SDK.
+     */
+    const char *mode_env = getenv("DOCA_PIPELINES_MODE");
+    const char *mode = (mode_env != nullptr && strcmp(mode_env, "esp_rr") == 0) ? mode_env : "meta_rr";
+
+    if (strcmp(mode, "esp_rr") == 0) {
+        result = doca_pipelines_run_esp_rr_pipeline(nb_q);
+    } else {
+        result = doca_pipelines_run_meta_rr_pipeline(nb_q);
+    }
     if (result != DOCA_SUCCESS) {
-        RTE_LOG(ERR, DOCA_PIPELINES, "DOCA meta_rr pipeline failed: %s\n", doca_error_get_descr(result));
+        RTE_LOG(ERR, DOCA_PIPELINES, "DOCA %s pipeline failed: %s\n", mode, doca_error_get_descr(result));
         doca_pipelines_cleanup();
         return -1;
     }
 
-    RTE_LOG(INFO, DOCA_PIPELINES, "DOCA meta_rr pipeline ready (%u queues)\n", static_cast<unsigned>(nb_q));
+    RTE_LOG(INFO, DOCA_PIPELINES, "DOCA %s pipeline ready (%u queues)\n", mode, static_cast<unsigned>(nb_q));
     g_pipelines_ctx.initialized = true;
 
     char n[RTE_ETH_NAME_MAX_LEN];
@@ -321,6 +334,7 @@ int doca_pipelines_init(uint16_t nb_queues)
 void doca_pipelines_cleanup(void)
 {
     if (g_pipelines_ctx.initialized) {
+        g_pipelines_ctx.graph.log_counters("shutdown");
         g_pipelines_ctx.graph.destroy();
         g_pipelines_ctx.nb_steer_queues = 0;
 

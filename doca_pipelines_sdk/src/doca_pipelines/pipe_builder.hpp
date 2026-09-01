@@ -71,9 +71,41 @@ struct MatchMetaMasked { int u32_index; uint32_t mask; }; ///< meta.u32[u32_inde
  */
 struct MatchIPv4UDPDport { uint16_t dport; };
 
+/** outer L3 = IPv4, L4 = ESP (protocol 50). DOCA's parser recognizes ESP as a
+ *  first-class L4 type (DOCA_FLOW_L4_META_ESP), same as TCP/UDP/ICMP. */
+struct MatchIPv4ESP {};
+
+/**
+ * Match on the IPsec ESP header's Sequence Number field (tun.esp_sn) with a
+ * partial bit mask — NO parser_meta L4 field beyond what MatchIPv4ESP's own
+ * template already carries at the ROOT.
+ *
+ * Entry i matches when (tun.esp_sn & mask) == (i & mask). With mask =
+ * nb_queues - 1 (power-of-2 queue count) the lower log2(N) bits cycle 0..N-1
+ * as the sender's SN increments — same masked-round-robin pattern as
+ * MatchMetaMasked, but the field being matched is assigned by the traffic's
+ * *sender*, never computed by NIC-internal hardware, so it isn't subject to
+ * the same class of internal-engine reordering a NIC-computed counter is.
+ */
+struct MatchEspSnMasked { uint32_t mask; };
+
+/**
+ * Match on meta.pkt_meta (not meta.u32[]) with a partial bit mask — NO
+ * parser_meta field. Same masked-round-robin pattern as MatchMetaMasked, but
+ * targeting pkt_meta specifically: this is the one metadata field DOCA Flow
+ * exposes to the application (via the mlx5 PMD's generic flow-metadata
+ * dynfield mechanism, gated on rte_flow_dynf_metadata_register() —
+ * see drivers/net/mlx5/mlx5_rx.c's rxq_cq_to_mbuf()) — the u32[] scratch
+ * registers are internal-only and never reach the mbuf. Needed for any
+ * pipeline stage that must match on a value *after* it's been copied into
+ * pkt_meta (e.g. steering on an already-decapped packet's original tunnel
+ * field, which no longer exists post-decap — see doca_pipelines_esp_rr.cpp).
+ */
+struct MatchPktMetaMasked { uint32_t mask; };
 
 using MatchSpec = std::variant<MatchIPv4, MatchIPv4UDP, MatchIPv4Meta, MatchMeta,
-                               MatchIPv4UDPDport, MatchMetaMasked>;
+                               MatchIPv4UDPDport, MatchMetaMasked, MatchIPv4ESP,
+                               MatchEspSnMasked, MatchPktMetaMasked>;
 
 /** Forward destination variants. */
 struct FwdRSSAll { int nb_queues; uint32_t flags = DOCA_FLOW_RSS_UDP; }; ///< RSS to queues 0..nb_queues-1
@@ -87,6 +119,53 @@ using FwdSpec = std::variant<FwdRSSAll, FwdRSSOne, FwdPipe, FwdOL, FwdPort, FwdD
 
 /** Write meta.u32[u32_index] = value (builder encodes BE32). */
 struct ActionSetMeta { int u32_index; uint32_t value; };
+
+/** DIAGNOSTIC: write meta.pkt_meta = value (constant), same pattern as
+ *  ActionSetMeta but targeting pkt_meta directly -- used to isolate whether
+ *  writing pkt_meta at all (via any mechanism) reaches DOCA's own matching
+ *  and the mlx5 dynfield, independent of the COPY-from-a-real-field question. */
+struct ActionSetPktMeta { uint32_t value; };
+
+/**
+ * Copy the matched packet's ESP Sequence Number (tun.esp_sn) into
+ * meta.pkt_meta, via a DOCA_FLOW_ACTION_COPY action_desc — the mechanism
+ * that lets the value survive into the mbuf on the DPDK side (see
+ * mlx5_flow_rxq_dynf_set()/rxq_cq_to_mbuf() in drivers/net/mlx5, gated on
+ * rte_flow_dynf_metadata_register() being called).
+ *
+ * UNVERIFIED: the source field_string below ("tunnel.esp.sn") follows the
+ * documented <location>.<protocol>.<field> convention (doca_flow.h's
+ * doca_flow_desc_field comment, e.g. "tunnel.gre.protocol") but has no
+ * confirmed precedent anywhere in this codebase — the only known-working
+ * COPY example (AsoBlockBuilder) copies within the meta scratchpad itself
+ * ("meta.data"), not a real header field. Verify against DOCA Flow
+ * documentation or empirical testing before trusting this compiles/works as
+ * intended; a build or runtime failure here likely means the string is
+ * wrong, not that the mechanism is unsupported.
+ */
+struct ActionCopyEspSnToMeta {};
+
+/**
+ * Strip an outer header down to whatever DOCA's decap_cfg considers the
+ * "inner" packet, via doca_flow_actions.decap_type/decap_cfg.
+ *
+ * UNVERIFIED, flagged explicitly rather than assumed: doca_flow_resource_decap_cfg
+ * (is_l2/eth/eth_vlan) is documented in general L2/L3-tunnel terms (e.g.
+ * VXLAN/GRE-style decap) — it is NOT confirmed here to correctly strip an
+ * ESP header's own SPI+SN framing specifically, nor is it confirmed that the
+ * generic decap path (vs. doca_flow_crypto.h's DOCA_FLOW_CRYPTO_REFORMAT_DECAP,
+ * a different, crypto/SA-resource-bound mechanism) is even the right one for
+ * ESP. `is_l2 = false` is used here on the assumption that decap needs to
+ * rebuild a real Ethernet header for the resulting inner packet (since
+ * examples/l3fwd downstream expects standard Ethernet framing) — `eth` must
+ * be supplied by the caller (this builder does not invent MAC addresses).
+ * Confirm this whole action against real DOCA Flow documentation/hardware
+ * before trusting the transmitted inner packet's framing is correct.
+ */
+struct ActionDecap {
+    bool                        is_l2 = false;
+    struct doca_flow_header_eth eth   = {}; ///< only used when is_l2 == false
+};
 
 
 /**
@@ -115,6 +194,17 @@ public:
 
     /** Set meta.u32[u32_index] = value (host-order). May be called multiple times. */
     BasicPipeBuilder &action(ActionSetMeta a);
+
+    /** DIAGNOSTIC: set meta.pkt_meta = value (constant, host-order). */
+    BasicPipeBuilder &action(ActionSetPktMeta a);
+
+    /** Copy the matched ESP SN into meta.pkt_meta. See ActionCopyEspSnToMeta's
+     *  doc comment for the unverified field_string assumption this relies on. */
+    BasicPipeBuilder &action(ActionCopyEspSnToMeta a);
+
+    /** Strip the outer tunnel framing. See ActionDecap's doc comment for the
+     *  unverified assumptions this relies on for ESP specifically. */
+    BasicPipeBuilder &decap(ActionDecap a);
 
     /** Disable the non-shared counter monitor (it is on by default). */
     BasicPipeBuilder &no_monitor();
@@ -167,6 +257,9 @@ private:
 
     std::optional<MatchSpec>                       match_;
     std::vector<ActionSetMeta>                     actions_;
+    std::optional<ActionSetPktMeta>                set_pkt_meta_;
+    bool                                           copy_esp_sn_to_meta_   = false;
+    std::optional<ActionDecap>                     decap_;
     bool                                           monitor_               = true;
     bool                                           null_actions_template_ = false;
     std::optional<FwdSpec>                         fwd_;
